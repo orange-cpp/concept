@@ -36,6 +36,14 @@ The interactive calculator example can be built and run with:
 .\calculator.exe
 ```
 
+Generated programs use four cooperative VM contexts by default. Select between
+1 and 64 contexts with `--vms`:
+
+```powershell
+.\build\Release\concept.exe .\examples\calculator.concept `
+    -o calculator.exe --vms 8
+```
+
 ## Current syntax
 
 ```c
@@ -78,7 +86,10 @@ The bootstrap subset supports:
 
 Strings currently support storage, function returns, printing, and `==`/`!=`.
 Concatenation, indexing, and conversion between strings and numeric values are
-not implemented yet.
+not implemented yet. Serialized string bytes are encrypted with a fresh
+per-compilation ChaCha20 key and decrypted when the runtime loads the program.
+The key must be recoverable from the executable, so this hides plaintext but is
+an obfuscation boundary rather than secret-key protection.
 
 Every program must define `main` with an integral or `bool` return type. Its
 result becomes the executable's process exit code. Numeric values are converted
@@ -101,12 +112,15 @@ The runtime reads the trailer from its own executable, verifies and deserializes
 the bytecode, and executes it on a stack VM. The bytecode image is versioned so
 the instruction set can evolve deliberately.
 
-Every compiler invocation generates a fresh opcode-layout seed. That seed
-shuffles the VM's instruction bytes to unique values across the full `0..255`
-range, so compiling identical source twice produces different bytecode. The
-runtime reconstructs the inverse mapping before validation and execution. This
-is an obfuscation layer, not encryption: the executable necessarily contains
-enough information for its VM to recover the mapping.
+Every compiler invocation divides code into instruction-aligned VM regions.
+Each region receives a separate opcode-layout seed that shuffles instruction
+bytes to unique values across the full `0..255` range. The runtime reconstructs
+each inverse mapping, validates the regions, and cooperatively switches the
+active VM context as control flow crosses region boundaries. Contexts own their
+code regions while sharing the operand stack, call frames, locals, and string
+heap. Compiling identical source twice therefore produces different bytecode.
+This is an obfuscation layer, not encryption: the executable necessarily
+contains enough information for its VMs to recover their mappings.
 
 Self-hosting is a later bootstrap stage: extend this subset until a Concept
 compiler can be written in Concept, compile it with the C++ compiler, then package

@@ -1,5 +1,7 @@
 #include "concept/compiler.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <charconv>
@@ -160,6 +162,18 @@ std::uint64_t fresh_opcode_seed() {
     static std::atomic<std::uint64_t> sequence{};
     return mix_seed(process_seed +
                     sequence.fetch_add(1, std::memory_order_relaxed));
+}
+
+template <std::size_t Size>
+void fill_random_bytes(std::array<std::uint8_t, Size>& output) {
+    for (std::size_t offset = 0; offset < output.size(); offset += 8) {
+        const auto value = fresh_opcode_seed();
+        const auto count = std::min<std::size_t>(8, output.size() - offset);
+        for (std::size_t index = 0; index < count; ++index) {
+            output[offset + index] =
+                static_cast<std::uint8_t>(value >> (index * 8));
+        }
+    }
 }
 
 class Lexer {
@@ -827,7 +841,6 @@ public:
         result.entry = main->second.entry;
         result.entry_locals = main->second.locals;
         result.entry_type = main->second.return_type;
-        result.opcode_seed = fresh_opcode_seed();
         result.strings = std::move(strings_);
         if (!is_integral(result.entry_type) &&
             result.entry_type != ValueType::boolean) {
@@ -1390,10 +1403,21 @@ private:
 
 } // namespace
 
-Bytecode compile(const std::string_view source, const std::string_view filename) {
+Bytecode compile(const std::string_view source, const std::string_view filename,
+                 const std::uint32_t vm_count) {
+    if (vm_count == 0 || vm_count > 64) {
+        throw CompileError("VM count must be between 1 and 64");
+    }
     Parser parser(source, filename);
     auto functions = parser.parse_program();
-    return CodeGenerator(functions, filename).generate();
+    auto bytecode = CodeGenerator(functions, filename).generate();
+    bytecode.vm_seeds.reserve(vm_count);
+    for (std::uint32_t index = 0; index < vm_count; ++index) {
+        bytecode.vm_seeds.push_back(fresh_opcode_seed());
+    }
+    fill_random_bytes(bytecode.string_key);
+    fill_random_bytes(bytecode.string_nonce);
+    return bytecode;
 }
 
 } // namespace cpt

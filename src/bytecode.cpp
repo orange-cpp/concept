@@ -16,7 +16,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 4;
+constexpr std::uint32_t bytecode_version = 5;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -129,50 +129,191 @@ make_opcode_map(const std::uint64_t seed) {
     return mapping;
 }
 
-std::vector<std::uint8_t>
-encode_opcodes(const std::vector<std::uint8_t>& canonical_code,
-               const std::uint64_t seed) {
-    const auto mapping = make_opcode_map(seed);
-    auto encoded = canonical_code;
+std::vector<Bytecode::VmRegion>
+make_vm_regions(const std::vector<std::uint8_t>& canonical_code,
+                const std::vector<std::uint64_t>& requested_seeds) {
+    std::vector<std::uint32_t> instruction_starts;
     std::size_t offset = 0;
     while (offset < canonical_code.size()) {
+        instruction_starts.push_back(static_cast<std::uint32_t>(offset));
         const auto raw_op = canonical_code[offset];
-        if (raw_op >= mapping.size()) {
+        if (raw_op > static_cast<std::uint8_t>(Op::return_value)) {
             throw std::runtime_error("unknown Concept bytecode instruction");
         }
-        encoded[offset] = mapping[raw_op];
         offset += 1 + operand_size(static_cast<Op>(raw_op));
+        if (offset > canonical_code.size()) {
+            throw std::runtime_error("truncated Concept bytecode instruction");
+        }
+    }
+
+    const std::size_t requested_count =
+        requested_seeds.empty() ? 1 : requested_seeds.size();
+    const auto region_count =
+        std::min(requested_count, instruction_starts.size());
+    std::vector<Bytecode::VmRegion> regions;
+    regions.reserve(region_count);
+    for (std::size_t region = 0; region < region_count; ++region) {
+        const auto first_instruction =
+            region * instruction_starts.size() / region_count;
+        const auto next_instruction =
+            (region + 1) * instruction_starts.size() / region_count;
+        regions.push_back(
+            {instruction_starts[first_instruction],
+             next_instruction == instruction_starts.size()
+                 ? static_cast<std::uint32_t>(canonical_code.size())
+                 : instruction_starts[next_instruction],
+             requested_seeds.empty() ? 0 : requested_seeds[region]});
+    }
+    return regions;
+}
+
+std::vector<std::uint8_t> encode_opcodes(
+    const std::vector<std::uint8_t>& canonical_code,
+    const std::vector<Bytecode::VmRegion>& regions) {
+    auto encoded = canonical_code;
+    for (const auto& region : regions) {
+        const auto mapping = make_opcode_map(region.opcode_seed);
+        std::size_t offset = region.begin;
+        while (offset < region.end) {
+            const auto raw_op = canonical_code[offset];
+            if (raw_op >= mapping.size()) {
+                throw std::runtime_error("unknown Concept bytecode instruction");
+            }
+            encoded[offset] = mapping[raw_op];
+            offset += 1 + operand_size(static_cast<Op>(raw_op));
+        }
+        if (offset != region.end) {
+            throw std::runtime_error("VM region splits a bytecode instruction");
+        }
     }
     return encoded;
 }
 
-std::vector<std::uint8_t>
-decode_opcodes(const std::span<const std::uint8_t> encoded_code,
-               const std::uint64_t seed) {
+std::vector<std::uint8_t> decode_opcodes(
+    const std::span<const std::uint8_t> encoded_code,
+    const std::vector<Bytecode::VmRegion>& regions) {
     constexpr std::uint8_t invalid_opcode = 0xff;
-    std::array<std::uint8_t, 256> inverse{};
-    inverse.fill(invalid_opcode);
-    const auto mapping = make_opcode_map(seed);
-    for (std::size_t canonical = 0; canonical < mapping.size(); ++canonical) {
-        inverse[mapping[canonical]] = static_cast<std::uint8_t>(canonical);
-    }
-
     std::vector<std::uint8_t> decoded(encoded_code.begin(), encoded_code.end());
-    std::size_t offset = 0;
-    while (offset < decoded.size()) {
-        const auto canonical = inverse[decoded[offset]];
-        if (canonical == invalid_opcode) {
-            throw std::runtime_error(
-                "opcode does not belong to this Concept bytecode layout");
+    for (const auto& region : regions) {
+        std::array<std::uint8_t, 256> inverse{};
+        inverse.fill(invalid_opcode);
+        const auto mapping = make_opcode_map(region.opcode_seed);
+        for (std::size_t canonical = 0; canonical < mapping.size(); ++canonical) {
+            inverse[mapping[canonical]] = static_cast<std::uint8_t>(canonical);
         }
-        decoded[offset] = canonical;
-        const auto size = operand_size(static_cast<Op>(canonical));
-        if (size > decoded.size() - offset - 1) {
-            throw std::runtime_error("truncated Concept bytecode instruction");
+
+        std::size_t offset = region.begin;
+        while (offset < region.end) {
+            const auto canonical = inverse[decoded[offset]];
+            if (canonical == invalid_opcode) {
+                throw std::runtime_error(
+                    "opcode does not belong to its Concept VM context");
+            }
+            decoded[offset] = canonical;
+            const auto size = operand_size(static_cast<Op>(canonical));
+            if (size > region.end - offset - 1) {
+                throw std::runtime_error(
+                    "VM region splits a bytecode instruction");
+            }
+            offset += 1 + size;
         }
-        offset += 1 + size;
+        if (offset != region.end) {
+            throw std::runtime_error("invalid Concept VM region boundary");
+        }
     }
     return decoded;
+}
+
+std::uint32_t load_word(const std::uint8_t* bytes) {
+    return static_cast<std::uint32_t>(bytes[0]) |
+           (static_cast<std::uint32_t>(bytes[1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[3]) << 24);
+}
+
+void quarter_round(std::uint32_t& a, std::uint32_t& b, std::uint32_t& c,
+                   std::uint32_t& d) {
+    a += b;
+    d ^= a;
+    d = std::rotl(d, 16);
+    c += d;
+    b ^= c;
+    b = std::rotl(b, 12);
+    a += b;
+    d ^= a;
+    d = std::rotl(d, 8);
+    c += d;
+    b ^= c;
+    b = std::rotl(b, 7);
+}
+
+std::array<std::uint8_t, 64> chacha20_block(
+    const std::array<std::uint8_t, 32>& key,
+    const std::array<std::uint8_t, 12>& nonce,
+    const std::uint32_t counter) {
+    std::array<std::uint32_t, 16> state{
+        0x61707865U, 0x3320646eU, 0x79622d32U, 0x6b206574U,
+    };
+    for (std::size_t index = 0; index < 8; ++index) {
+        state[4 + index] = load_word(key.data() + index * 4);
+    }
+    state[12] = counter;
+    state[13] = load_word(nonce.data());
+    state[14] = load_word(nonce.data() + 4);
+    state[15] = load_word(nonce.data() + 8);
+
+    auto working = state;
+    for (unsigned round = 0; round < 10; ++round) {
+        quarter_round(working[0], working[4], working[8], working[12]);
+        quarter_round(working[1], working[5], working[9], working[13]);
+        quarter_round(working[2], working[6], working[10], working[14]);
+        quarter_round(working[3], working[7], working[11], working[15]);
+        quarter_round(working[0], working[5], working[10], working[15]);
+        quarter_round(working[1], working[6], working[11], working[12]);
+        quarter_round(working[2], working[7], working[8], working[13]);
+        quarter_round(working[3], working[4], working[9], working[14]);
+    }
+
+    std::array<std::uint8_t, 64> block{};
+    for (std::size_t word = 0; word < working.size(); ++word) {
+        const auto value = working[word] + state[word];
+        for (unsigned byte = 0; byte < 4; ++byte) {
+            block[word * 4 + byte] =
+                static_cast<std::uint8_t>(value >> (byte * 8));
+        }
+    }
+    return block;
+}
+
+void crypt_string(std::span<std::uint8_t> bytes,
+                  const std::array<std::uint8_t, 32>& key,
+                  const std::array<std::uint8_t, 12>& nonce,
+                  std::uint32_t counter) {
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const auto block = chacha20_block(key, nonce, counter++);
+        const auto count = std::min(block.size(), bytes.size() - offset);
+        for (std::size_t index = 0; index < count; ++index) {
+            bytes[offset + index] ^= block[index];
+        }
+        offset += count;
+    }
+}
+
+void crypt_string_at_index(
+    std::span<std::uint8_t> bytes,
+    const std::array<std::uint8_t, 32>& key,
+    const std::array<std::uint8_t, 12>& base_nonce,
+    const std::uint32_t string_index) {
+    auto nonce = base_nonce;
+    std::uint64_t carry = string_index;
+    for (std::size_t index = 0; index < nonce.size() && carry != 0; ++index) {
+        const auto sum = static_cast<std::uint64_t>(nonce[index]) +
+                         (carry & 0xffU);
+        nonce[index] = static_cast<std::uint8_t>(sum);
+        carry = (carry >> 8) + (sum >> 8);
+    }
+    crypt_string(bytes, key, nonce, 1);
 }
 
 } // namespace
@@ -194,28 +335,50 @@ std::vector<std::uint8_t> serialize(const Bytecode& bytecode) {
         string_bytes += 4 + value.size();
     }
 
+    const auto regions = make_vm_regions(bytecode.code, bytecode.vm_seeds);
+    if (regions.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("too many VM regions in Concept bytecode");
+    }
+    const auto encoded_code = encode_opcodes(bytecode.code, regions);
+
+    constexpr std::size_t header_size = 80;
+    constexpr std::size_t region_size = 16;
     std::vector<std::uint8_t> output;
-    const auto encoded_code =
-        encode_opcodes(bytecode.code, bytecode.opcode_seed);
-    output.reserve(40 + encoded_code.size() + string_bytes);
+    output.reserve(header_size + regions.size() * region_size +
+                   encoded_code.size() + string_bytes);
     output.insert(output.end(), bytecode_magic.begin(), bytecode_magic.end());
     append_u32(output, bytecode_version);
     append_u32(output, bytecode.entry);
     append_u32(output, bytecode.entry_locals);
     append_u32(output, static_cast<std::uint32_t>(bytecode.entry_type));
-    append_u64(output, bytecode.opcode_seed);
     append_u32(output, static_cast<std::uint32_t>(encoded_code.size()));
     append_u32(output, static_cast<std::uint32_t>(bytecode.strings.size()));
+    append_u32(output, static_cast<std::uint32_t>(regions.size()));
+    output.insert(output.end(), bytecode.string_key.begin(),
+                  bytecode.string_key.end());
+    output.insert(output.end(), bytecode.string_nonce.begin(),
+                  bytecode.string_nonce.end());
+    for (const auto& region : regions) {
+        append_u32(output, region.begin);
+        append_u32(output, region.end);
+        append_u64(output, region.opcode_seed);
+    }
     output.insert(output.end(), encoded_code.begin(), encoded_code.end());
-    for (const auto& value : bytecode.strings) {
+    for (std::size_t index = 0; index < bytecode.strings.size(); ++index) {
+        const auto& value = bytecode.strings[index];
         append_u32(output, static_cast<std::uint32_t>(value.size()));
-        output.insert(output.end(), value.begin(), value.end());
+        std::vector<std::uint8_t> encrypted(value.begin(), value.end());
+        crypt_string_at_index(encrypted, bytecode.string_key,
+                              bytecode.string_nonce,
+                              static_cast<std::uint32_t>(index));
+        output.insert(output.end(), encrypted.begin(), encrypted.end());
     }
     return output;
 }
 
 Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
-    constexpr std::size_t header_size = 40;
+    constexpr std::size_t header_size = 80;
+    constexpr std::size_t region_size = 16;
     if (bytes.size() < header_size ||
         !std::equal(bytecode_magic.begin(), bytecode_magic.end(), bytes.begin())) {
         throw std::runtime_error("not a Concept bytecode image");
@@ -235,15 +398,39 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
         throw std::runtime_error("invalid Concept entry-point type");
     }
     bytecode.entry_type = static_cast<ValueType>(raw_entry_type);
-    bytecode.opcode_seed = read_u64(bytes, 24);
-    const auto code_size = read_u32(bytes, 32);
-    const auto string_count = read_u32(bytes, 36);
-    if (code_size > bytes.size() - header_size) {
+    const auto code_size = read_u32(bytes, 24);
+    const auto string_count = read_u32(bytes, 28);
+    const auto vm_count = read_u32(bytes, 32);
+    std::copy_n(bytes.begin() + 36, bytecode.string_key.size(),
+                bytecode.string_key.begin());
+    std::copy_n(bytes.begin() + 68, bytecode.string_nonce.size(),
+                bytecode.string_nonce.begin());
+
+    std::size_t cursor = header_size;
+    if (vm_count == 0 || vm_count > (bytes.size() - cursor) / region_size) {
+        throw std::runtime_error("invalid Concept VM region table");
+    }
+    bytecode.vm_regions.reserve(vm_count);
+    bytecode.vm_seeds.reserve(vm_count);
+    std::uint32_t previous_end = 0;
+    for (std::uint32_t index = 0; index < vm_count; ++index) {
+        const auto begin = read_u32(bytes, cursor);
+        const auto end = read_u32(bytes, cursor + 4);
+        const auto seed = read_u64(bytes, cursor + 8);
+        cursor += region_size;
+        if (begin != previous_end || end <= begin || end > code_size) {
+            throw std::runtime_error("invalid Concept VM region boundary");
+        }
+        bytecode.vm_regions.push_back({begin, end, seed});
+        bytecode.vm_seeds.push_back(seed);
+        previous_end = end;
+    }
+    if (previous_end != code_size || code_size > bytes.size() - cursor) {
         throw std::runtime_error("invalid Concept bytecode image size");
     }
-    bytecode.code = decode_opcodes(bytes.subspan(header_size, code_size),
-                                   bytecode.opcode_seed);
-    std::size_t cursor = header_size + code_size;
+    bytecode.code = decode_opcodes(bytes.subspan(cursor, code_size),
+                                   bytecode.vm_regions);
+    cursor += code_size;
     if (string_count > (bytes.size() - cursor) / 4) {
         throw std::runtime_error("invalid Concept string table size");
     }
@@ -254,8 +441,11 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
         if (length > bytes.size() - cursor) {
             throw std::runtime_error("truncated Concept string constant");
         }
-        bytecode.strings.emplace_back(
-            reinterpret_cast<const char*>(bytes.data() + cursor), length);
+        std::vector<std::uint8_t> decrypted(
+            bytes.begin() + cursor, bytes.begin() + cursor + length);
+        crypt_string_at_index(decrypted, bytecode.string_key,
+                              bytecode.string_nonce, index);
+        bytecode.strings.emplace_back(decrypted.begin(), decrypted.end());
         cursor += length;
     }
     if (cursor != bytes.size()) {
@@ -330,6 +520,23 @@ void validate(const Bytecode& bytecode) {
             targets.push_back(read_u32(bytecode.code, offset));
         }
         offset += size;
+    }
+
+    if (!bytecode.vm_regions.empty()) {
+        std::uint32_t previous_end = 0;
+        for (const auto& region : bytecode.vm_regions) {
+            if (region.begin != previous_end || region.end <= region.begin ||
+                region.end > instruction_starts.size() ||
+                !instruction_starts[region.begin] ||
+                (region.end != instruction_starts.size() &&
+                 !instruction_starts[region.end])) {
+                throw std::runtime_error("invalid Concept VM region layout");
+            }
+            previous_end = region.end;
+        }
+        if (previous_end != instruction_starts.size()) {
+            throw std::runtime_error("Concept VM regions do not cover bytecode");
+        }
     }
 
     const auto check_target = [&](const std::uint32_t target,

@@ -1,6 +1,8 @@
 #include "concept/compiler.hpp"
 #include "concept/package.hpp"
 
+#include <charconv>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -41,7 +43,7 @@ std::string read_source(const std::filesystem::path& path) {
 
 void print_usage() {
     std::cerr << "usage: concept <source.concept> [-o <program.exe>] "
-                 "[--runtime <concept-runtime.exe>]\n";
+                 "[--runtime <concept-runtime.exe>] [--vms <1..64>]\n";
 }
 
 } // namespace
@@ -67,10 +69,12 @@ int main(const int argc, char** argv) {
 #else
             "concept-runtime";
 #endif
+        std::uint32_t vm_count = 4;
 
         for (int index = 2; index < argc; ++index) {
             const std::string argument = argv[index];
-            if ((argument == "-o" || argument == "--runtime") &&
+            if ((argument == "-o" || argument == "--runtime" ||
+                 argument == "--vms") &&
                 index + 1 >= argc) {
                 throw std::runtime_error("missing path after " + argument);
             }
@@ -78,6 +82,16 @@ int main(const int argc, char** argv) {
                 output_path = argv[++index];
             } else if (argument == "--runtime") {
                 runtime_path = argv[++index];
+            } else if (argument == "--vms") {
+                const std::string_view value = argv[++index];
+                const auto result = std::from_chars(
+                    value.data(), value.data() + value.size(), vm_count);
+                if (result.ec != std::errc{} ||
+                    result.ptr != value.data() + value.size() ||
+                    vm_count == 0 || vm_count > 64) {
+                    throw std::runtime_error(
+                        "--vms must be an integer between 1 and 64");
+                }
             } else {
                 throw std::runtime_error("unknown argument: " + argument);
             }
@@ -89,7 +103,8 @@ int main(const int argc, char** argv) {
         }
 
         const auto source = read_source(source_path);
-        const auto bytecode = cpt::compile(source, source_path.string());
+        const auto bytecode =
+            cpt::compile(source, source_path.string(), vm_count);
         const auto image = cpt::serialize(bytecode);
         cpt::package_executable(runtime_path, output_path, image);
         std::cout << "built " << std::filesystem::absolute(output_path).string()

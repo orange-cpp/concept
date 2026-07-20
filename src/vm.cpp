@@ -516,6 +516,13 @@ std::int64_t exit_value(const ValueType type, const std::uint64_t bits) {
 std::int64_t execute(const Bytecode& bytecode) {
     validate(bytecode);
 
+    struct VmContext {
+        std::uint32_t begin{};
+        std::uint32_t end{};
+        std::uint64_t opcode_seed{};
+        std::span<const std::uint8_t> owned_code;
+    };
+
     constexpr std::size_t maximum_call_depth = 4096;
     std::vector<std::uint64_t> stack;
     std::vector<Frame> frames;
@@ -524,6 +531,38 @@ std::int64_t execute(const Bytecode& bytecode) {
         {bytecode.code.size(), 0,
          std::vector<std::uint64_t>(bytecode.entry_locals, 0)});
     std::size_t ip = bytecode.entry;
+    std::vector<VmContext> vm_contexts;
+    if (bytecode.vm_regions.empty()) {
+        vm_contexts.push_back(
+            {0, static_cast<std::uint32_t>(bytecode.code.size()), 0,
+             bytecode.code});
+    } else {
+        vm_contexts.reserve(bytecode.vm_regions.size());
+        for (const auto& region : bytecode.vm_regions) {
+            vm_contexts.push_back(
+                {region.begin, region.end, region.opcode_seed,
+                 std::span<const std::uint8_t>(bytecode.code)
+                     .subspan(region.begin, region.end - region.begin)});
+        }
+    }
+    std::size_t active_vm = 0;
+
+    const auto select_vm = [&]() -> const VmContext& {
+        const auto contains_ip = [&](const VmContext& context) {
+            return ip >= context.begin && ip < context.end;
+        };
+        if (contains_ip(vm_contexts[active_vm])) {
+            return vm_contexts[active_vm];
+        }
+        for (std::size_t index = 0; index < vm_contexts.size(); ++index) {
+            if (contains_ip(vm_contexts[index])) {
+                active_vm = index;
+                return vm_contexts[index];
+            }
+        }
+        throw std::runtime_error(
+            "Concept instruction pointer belongs to no VM context");
+    };
 
     const auto pop = [&]() {
         if (stack.empty() || stack.size() <= frames.back().stack_base) {
@@ -535,10 +574,10 @@ std::int64_t execute(const Bytecode& bytecode) {
     };
 
     for (;;) {
-        if (ip >= bytecode.code.size()) {
-            throw std::runtime_error("Concept VM instruction pointer is invalid");
-        }
-        const auto op = static_cast<Op>(bytecode.code[ip++]);
+        const auto& vm = select_vm();
+        const auto local_ip = ip - vm.begin;
+        const auto op = static_cast<Op>(vm.owned_code[local_ip]);
+        ++ip;
 
         switch (op) {
         case Op::push_bits:

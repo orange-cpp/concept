@@ -14,6 +14,7 @@ public:
 };
 
 [[nodiscard]] Bytecode compile(std::string_view source,
-                               std::string_view filename = "<input>");
+                               std::string_view filename = "<input>",
+                               std::uint32_t vm_count = 4);
 
 } // namespace cpt

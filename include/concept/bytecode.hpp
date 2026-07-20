@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <span>
 #include <string>
 #include <vector>
@@ -70,11 +71,20 @@ enum class Op : std::uint8_t {
 };
 
 struct Bytecode {
+    struct VmRegion {
+        std::uint32_t begin{};
+        std::uint32_t end{};
+        std::uint64_t opcode_seed{};
+    };
+
     std::vector<std::uint8_t> code;
     std::uint32_t entry{};
     std::uint32_t entry_locals{};
     ValueType entry_type{ValueType::i64};
-    std::uint64_t opcode_seed{};
+    std::vector<std::uint64_t> vm_seeds;
+    std::vector<VmRegion> vm_regions;
+    std::array<std::uint8_t, 32> string_key{};
+    std::array<std::uint8_t, 12> string_nonce{};
     std::vector<std::string> strings;
 };
 

@@ -74,19 +74,31 @@ void randomized_opcode_test() {
     const auto first_image = cpt::serialize(first);
     const auto second_image = cpt::serialize(second);
 
-    expect(first.opcode_seed != second.opcode_seed,
-           "each compilation should receive a different opcode seed");
+    expect(first.vm_seeds.size() == 4 && second.vm_seeds.size() == 4 &&
+               first.vm_seeds != second.vm_seeds,
+           "each compilation should receive different per-VM opcode seeds");
     expect(first_image != second_image,
            "identical source compilations should produce different bytecode");
-    constexpr std::size_t header_size = 40;
+    constexpr std::size_t header_size = 80 + 4 * 16;
     expect(first_image.size() == second_image.size() &&
                !std::equal(first_image.begin() + header_size,
                            first_image.end(),
                            second_image.begin() + header_size),
            "encoded opcode streams should use different numeric layouts");
-    expect(cpt::execute(cpt::deserialize(first_image)) == 42 &&
-               cpt::execute(cpt::deserialize(second_image)) == 42,
+    const auto first_loaded = cpt::deserialize(first_image);
+    const auto second_loaded = cpt::deserialize(second_image);
+    expect(first_loaded.vm_regions.size() == 4 &&
+               second_loaded.vm_regions.size() == 4,
+           "serialized programs should contain four VM bytecode regions");
+    expect(cpt::execute(first_loaded) == 42 &&
+               cpt::execute(second_loaded) == 42,
            "every randomized opcode layout should decode and execute");
+
+    const auto eight_vms = cpt::deserialize(
+        cpt::serialize(cpt::compile(source, "eight-vms.concept", 8)));
+    expect(eight_vms.vm_regions.size() == 8 &&
+               cpt::execute(eight_vms) == 42,
+           "custom VM counts should preserve shared execution state");
 }
 
 void console_io_test() {
@@ -97,6 +109,7 @@ void console_io_test() {
 
         fn main() -> i32 {
             print("Name: ");
+            string hidden = "This string is deliberately longer than one ChaCha20 block so encryption spans multiple blocks.";
             string name = read_name();
             println(name);
             i64 whole = input_i64();
@@ -117,7 +130,16 @@ void console_io_test() {
     std::int64_t result = 0;
     try {
         const auto image = cpt::serialize(cpt::compile(source, "io-test.concept"));
-        result = cpt::execute(cpt::deserialize(image));
+        constexpr std::string_view secret =
+            "This string is deliberately longer than one ChaCha20 block so encryption spans multiple blocks.";
+        expect(std::search(image.begin(), image.end(), secret.begin(),
+                           secret.end()) == image.end(),
+               "packaged string constants should not appear as plaintext");
+        const auto loaded = cpt::deserialize(image);
+        expect(std::find(loaded.strings.begin(), loaded.strings.end(), secret) !=
+                   loaded.strings.end(),
+               "string constants should decrypt while loading the program");
+        result = cpt::execute(loaded);
     } catch (...) {
         std::cin.rdbuf(previous_input);
         std::cout.rdbuf(previous_output);
