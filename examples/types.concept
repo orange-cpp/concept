@@ -1,0 +1,26 @@
+fn calculate() -> double {
+    float factor = 1.5;
+    return f64(factor) * 28.0;
+}
+
+fn main() -> int {
+    i8 signed_byte = -8;
+    u8 wrapping_byte = 255;
+    i16 signed_word = signed_byte;
+    u16 unsigned_word = wrapping_byte;
+    i32 signed_number = signed_word;
+    u32 unsigned_number = unsigned_word;
+    i64 signed_wide = signed_number;
+    u64 unsigned_wide = unsigned_number;
+    f32 single_precision = 1.5;
+    f64 answer = calculate();
+    bool valid = answer == 42.0;
+
+    wrapping_byte = wrapping_byte + u8(1);
+    if (valid) {
+        if (wrapping_byte == u8(0)) {
+            return i32(answer);
+        }
+    }
+    return 0;
+}

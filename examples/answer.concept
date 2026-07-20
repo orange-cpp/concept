@@ -1,0 +1,17 @@
+fn forty() -> i64 {
+    return 40;
+}
+
+fn main() -> i64 {
+    i64 answer = forty();
+
+    while (answer < 42) {
+        answer = answer + 1;
+    }
+
+    if (answer == 42) {
+        return answer;
+    } else {
+        return 1;
+    }
+}
