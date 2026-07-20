@@ -36,6 +36,20 @@ The interactive calculator example can be built and run with:
 .\calculator.exe
 ```
 
+Source modules live in a `concept` directory and use the module filename
+without its extension:
+
+```c
+import std::socket;
+```
+
+This resolves `concept/std/socket.concept`. `std` modules and classes use
+qualified names such as `std::socket` and `std::Socket`. Imports are
+deduplicated, may import other
+modules, and report cycles as compile errors. The compiler also installs its
+standard `concept` directory beside `concept.exe` so standard modules remain
+available when compiling a source from another directory.
+
 Generated programs use four cooperative VM contexts by default. Select between
 1 and 64 contexts with `--vms`:
 
@@ -47,6 +61,15 @@ Generated programs use four cooperative VM contexts by default. Select between
 ## Current syntax
 
 ```c
+class Counter {
+    i32 value;
+
+    fn increment() -> int {
+        this.value = this.value + 1;
+        return this.value;
+    }
+}
+
 @complexity(25)
 fn calculate() -> double {
     float factor = 1.5;
@@ -84,6 +107,11 @@ The bootstrap subset supports:
   `input_f64()` for parsed numeric lines;
 - `print(value)` and `println(value)` for every core value type;
 - `//` line comments.
+- qualified top-level imports such as `import std::socket;`.
+- classes with core-type fields, automatic construction, `object.field`
+  access, reference-style assignment, no-argument methods, and `this`;
+- typed pointers with `T*`, address-of `&`, dereference `*`, indirect
+  assignment, pointer-to-pointer values, and pointers to locals or fields;
 
 Functions can use `@complexity(level)`, where `level` is from `0` to `100`.
 Level `0` emits straight bytecode. Higher levels add progressively more opaque
@@ -91,6 +119,30 @@ branches, shuffled control-flow paths, and unreachable stack-balanced junk
 instructions to that function. `@complexty(level)` is also accepted as an
 alias for compatibility with the original spelling. The calculator example
 uses level `100`.
+
+Class instances are created with `Counter()` or automatically by an
+uninitialized declaration such as `Counter value;`. Assignment shares the same
+object, so mutations through an alias are visible through every reference. A
+method accesses its receiver through `this`, including calls such as
+`this.increment()`. Fields currently use core types, and methods follow the
+current no-argument user-function model. Constructors, method parameters,
+inheritance, and visibility modifiers are not implemented yet.
+
+Pointers use C-style syntax:
+
+```c
+i32 value = 41;
+i32* pointer = &value;
+*pointer = *pointer + 1;
+```
+
+They are checked VM references, not native process addresses. A null pointer is
+created by leaving a pointer declaration uninitialized. Dereferencing null,
+invalid, or expired-local pointers stops the VM with an error. Core locals,
+pointer locals, class variables, and core class fields can be addressed;
+multi-level pointers and pointer fields are supported. Pointer arithmetic,
+casts, function pointer parameters/returns, arrays, and native-address access
+are not implemented yet.
 
 Strings currently support storage, function returns, printing, and `==`/`!=`.
 Concatenation, indexing, and conversion between strings and numeric values are
@@ -133,6 +185,37 @@ contains enough information for its VMs to recover their mappings.
 Complexity decorators are also an obfuscation boundary rather than a security
 guarantee. They increase reverse-engineering cost and executable size, but a
 determined analyst can still recover program behavior.
+
+## Standard TCP sockets
+
+`import std::socket;` enables the `std::Socket` IPv4 TCP class, modeled after
+Berkeley sockets:
+
+```c
+std::Socket server = std::Socket();
+bool bound = server.bind("127.0.0.1", u16(8080));
+bool listening = server.listen(16);
+
+std::Socket client = std::Socket();
+bool connected = client.connect("127.0.0.1", u16(8080));
+std::Socket peer = server.accept();
+i64 bytes = client.send("hello");
+string chunk = peer.recv();
+bool closed = client.close();
+```
+
+`valid()` reports whether construction or `accept()` produced a valid socket.
+`send()` returns `-1` when it cannot send any bytes. `recv()` reads up to 4096
+bytes and returns an empty string on orderly shutdown or error. `bind()` accepts
+`"*"` or an empty string for all IPv4 interfaces. Sockets must be closed
+explicitly.
+MSVC builds implement this API with Winsock while keeping the static CRT
+configuration. The runtime has no static `WS2_32.dll` import: it decodes the
+module and operation names, loads the socket component, and resolves its entry
+points only when a socket opcode executes. Programs that do not execute socket
+operations therefore never load Winsock. This removes the obvious socket API
+from the PE import table, but runtime inspection can still observe the module
+after it is loaded.
 
 Self-hosting is a later bootstrap stage: extend this subset until a Concept
 compiler can be written in Concept, compile it with the C++ compiler, then package

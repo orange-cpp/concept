@@ -1,0 +1,40 @@
+class Simple {
+    i32 value;
+    string name;
+
+    @complexity(25)
+    fn increment() -> int {
+        this.value = this.value + 1;
+        return this.value;
+    }
+
+    fn increment_twice() -> int {
+        this.increment();
+        return this.increment();
+    }
+
+    fn label() -> string {
+        return this.name;
+    }
+}
+
+@complexity(50)
+fn main() -> int {
+    Simple first = Simple();
+    first.value = 40;
+    first.name = "shared object";
+
+    Simple second = first;
+    i32 answer = second.increment_twice();
+
+    Simple empty;
+    if (empty.name != "") {
+        return 1;
+    }
+    if (first.value == 42) {
+        if (second.label() == "shared object") {
+            return answer;
+        }
+    }
+    return 0;
+}

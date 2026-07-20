@@ -1,0 +1,38 @@
+import std::socket;
+
+@complexity(50)
+fn main() -> int {
+    std::Socket client = std::Socket();
+    if (!client.valid()) {
+        println("Could not create socket.");
+        return 1;
+    }
+
+    if (!client.connect("127.0.0.1", u16(8000))) {
+        println("Could not connect to 127.0.0.1:8000.");
+        client.close();
+        return 2;
+    }
+
+    string request = "GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    i64 sent = client.send(request);
+    if (sent == -1) {
+        println("Could not send HTTP request.");
+        client.close();
+        return 3;
+    }
+
+    bool received = false;
+    string response = client.recv();
+    while (response != "") {
+        received = true;
+        print(response);
+        response = client.recv();
+    }
+    client.close();
+    if (!received) {
+        println("Server returned no data.");
+        return 4;
+    }
+    return 0;
+}

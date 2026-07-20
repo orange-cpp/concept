@@ -6,9 +6,17 @@
 #include <algorithm>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string_view>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -143,6 +151,232 @@ void complexity_decorator_test() {
     expect(cpt::execute(cpt::deserialize(cpt::serialize(medium))) == 42 &&
                cpt::execute(cpt::deserialize(cpt::serialize(full))) == 42,
            "obfuscated bytecode should preserve behavior across eight VMs");
+}
+
+void class_test() {
+    constexpr std::string_view source = R"(
+        class Counter {
+            i32 value;
+            string label;
+
+            @complexity(25)
+            fn increment() -> int {
+                this.value = this.value + 1;
+                return this.value;
+            }
+
+            fn increment_twice() -> int {
+                this.increment();
+                return this.increment();
+            }
+
+            fn get_label() -> string {
+                return this.label;
+            }
+        }
+
+        @complexity(50)
+        fn main() -> int {
+            Counter first = Counter();
+            first.value = 40;
+            first.label = "shared";
+            Counter alias = first;
+            i32 answer = alias.increment_twice();
+            Counter defaults;
+            if (defaults.label != "") { return 1; }
+            if (first.value == 42) {
+                if (alias.get_label() == "shared") { return answer; }
+            }
+            return 0;
+        }
+    )";
+
+    const auto compiled = cpt::compile(source, "class-test.concept", 8);
+    expect(cpt::execute(compiled) == 42,
+           "class fields, methods, this, and aliases should execute");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
+           "class objects should survive serialized multi-VM bytecode");
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            class Empty {}
+            fn main() -> int {
+                Empty value = Empty();
+                value.missing = 1;
+                return 0;
+            }
+        )"));
+        expect(false, "unknown class fields should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            class Bad { i32 value; i64 value; }
+            fn main() -> int { return 0; }
+        )"));
+        expect(false, "duplicate class fields should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
+}
+
+void pointer_test() {
+    constexpr std::string_view source = R"(
+        class Box {
+            i32 value;
+            i32* alias;
+        }
+
+        @complexity(50)
+        fn main() -> int {
+            i32 answer = 39;
+            i32* pointer = &answer;
+            *pointer = *pointer + 1;
+            i32** pointer_to_pointer = &pointer;
+            **pointer_to_pointer = **pointer_to_pointer + 1;
+
+            Box box;
+            Box* box_pointer = &box;
+            (*box_pointer).value = answer;
+            i32* field_pointer = &(*box_pointer).value;
+            *field_pointer = *field_pointer + 1;
+            box.alias = field_pointer;
+
+            f64 decimal = 40.5;
+            f64* decimal_pointer = &decimal;
+            *decimal_pointer = *decimal_pointer + 1.5;
+            bool valid = true;
+            bool* valid_pointer = &valid;
+            string label = "pointer";
+            string* label_pointer = &label;
+            if (*decimal_pointer != 42.0) { return 1; }
+            if (!*valid_pointer) { return 2; }
+            if (*label_pointer != "pointer") { return 3; }
+            return *box.alias;
+        }
+    )";
+
+    const auto compiled = cpt::compile(source, "pointer-test.concept", 8);
+    expect(cpt::execute(compiled) == 42,
+           "local, field, class, and multi-level pointers should execute");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
+           "pointers should survive serialized multi-VM bytecode");
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn main() -> int {
+                i32 value = 42;
+                i64* pointer = &value;
+                return 0;
+            }
+        )"));
+        expect(false, "incompatible pointer types should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn main() -> int {
+                i32* pointer = &(40 + 2);
+                return 0;
+            }
+        )"));
+        expect(false, "taking the address of a temporary should fail");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::execute(cpt::compile(R"(
+            fn main() -> int {
+                i32* pointer;
+                return *pointer;
+            }
+        )")));
+        expect(false, "dereferencing a null pointer should fail at runtime");
+    } catch (const std::runtime_error&) {
+    }
+
+    try {
+        static_cast<void>(cpt::execute(cpt::compile(R"(
+            class Holder {
+                i32* pointer;
+                fn capture() -> int {
+                    i32 local = 42;
+                    this.pointer = &local;
+                    return 0;
+                }
+            }
+            fn main() -> int {
+                Holder holder;
+                holder.capture();
+                return *holder.pointer;
+            }
+        )")));
+        expect(false, "dereferencing an expired local pointer should fail");
+    } catch (const std::runtime_error&) {
+    }
+}
+
+void import_test() {
+    const auto source_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path();
+    const auto standard_modules = source_root / "concept";
+    const auto test_modules = source_root / "tests" / "modules";
+
+    constexpr std::string_view custom_source = R"(
+        import math;
+        import math;
+        fn main() -> int { return imported_answer(); }
+    )";
+    expect(cpt::execute(cpt::compile(custom_source, "import-test.concept", 4,
+                                     test_modules.string())) == 42,
+           "imports should merge a module once and expose its functions");
+#ifdef _WIN32
+    expect(GetModuleHandleW(L"ws2_32.dll") == nullptr,
+           "programs without socket operations should not load Winsock");
+#endif
+
+    constexpr std::string_view std_source = R"(
+        import std::socket;
+        import std::socket;
+        fn main() -> int {
+            std::Socket handle = std::Socket();
+            if (!handle.valid()) { return 1; }
+            if (handle.close()) { return 42; }
+            return 2;
+        }
+    )";
+    expect(cpt::execute(cpt::compile(std_source, "std-import-test.concept", 8,
+                                     standard_modules.string())) == 42,
+           "import std::socket should enable std::Socket across multiple VMs");
+#ifdef _WIN32
+    expect(GetModuleHandleW(L"ws2_32.dll") != nullptr,
+           "the first socket operation should load Winsock lazily");
+#endif
+
+    try {
+        static_cast<void>(cpt::compile(
+            "import cycle_a; fn main() -> int { return 0; }",
+            "cycle-test.concept", 4, test_modules.string()));
+        expect(false, "recursive module imports should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(
+            "fn main() -> int { std::Socket value = std::Socket(); return 0; }"));
+        expect(false,
+               "std::Socket should require import std::socket");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(
+            "import std::socket; fn main() -> int { u64 value = socket(); return 0; }",
+            "old-socket-api.concept", 4, standard_modules.string()));
+        expect(false, "legacy global socket functions should not be available");
+    } catch (const cpt::CompileError&) {
+    }
 }
 
 void console_io_test() {
@@ -320,6 +554,9 @@ int main() {
         forward_call_test();
         randomized_opcode_test();
         complexity_decorator_test();
+        class_test();
+        pointer_test();
+        import_test();
         console_io_test();
         core_types_test();
         error_test();

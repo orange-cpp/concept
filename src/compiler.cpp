@@ -8,12 +8,16 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <random>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -26,6 +30,8 @@ enum class TokenKind {
     integer,
     floating,
     string_literal,
+    import_kw,
+    class_kw,
     fn_kw,
     type_kw,
     return_kw,
@@ -41,6 +47,7 @@ enum class TokenKind {
     right_brace,
     semicolon,
     comma,
+    dot,
     arrow,
     assign,
     plus,
@@ -48,6 +55,7 @@ enum class TokenKind {
     star,
     slash,
     percent,
+    ampersand,
     bang,
     equal,
     not_equal,
@@ -59,9 +67,10 @@ enum class TokenKind {
 
 struct Token {
     TokenKind kind{};
-    std::string_view text;
+    std::string text;
     std::size_t line{};
     std::size_t column{};
+    std::string filename;
 };
 
 ValueType value_type_from_name(const std::string_view name) {
@@ -214,12 +223,26 @@ public:
         }
 
         if (is_identifier_start(character)) {
-            while (!at_end() && is_identifier_part(peek())) {
+            for (;;) {
+                while (!at_end() && is_identifier_part(peek())) {
+                    advance();
+                }
+                if (position_ + 2 >= source_.size() ||
+                    source_[position_] != ':' ||
+                    source_[position_ + 1] != ':' ||
+                    !is_identifier_start(source_[position_ + 2])) {
+                    break;
+                }
+                advance();
                 advance();
             }
             const auto text = source_.substr(start, position_ - start);
             TokenKind kind = TokenKind::identifier;
-            if (text == "fn") {
+            if (text == "import") {
+                kind = TokenKind::import_kw;
+            } else if (text == "class") {
+                kind = TokenKind::class_kw;
+            } else if (text == "fn") {
                 kind = TokenKind::fn_kw;
             } else if (is_type_name(text)) {
                 kind = TokenKind::type_kw;
@@ -288,6 +311,8 @@ public:
             return make_token(TokenKind::semicolon, start, 1, line, column);
         case ',':
             return make_token(TokenKind::comma, start, 1, line, column);
+        case '.':
+            return make_token(TokenKind::dot, start, 1, line, column);
         case '+':
             return make_token(TokenKind::plus, start, 1, line, column);
         case '*':
@@ -296,6 +321,8 @@ public:
             return make_token(TokenKind::slash, start, 1, line, column);
         case '%':
             return make_token(TokenKind::percent, start, 1, line, column);
+        case '&':
+            return make_token(TokenKind::ampersand, start, 1, line, column);
         case '-':
             if (match('>')) {
                 return make_token(TokenKind::arrow, start, 2, line, column);
@@ -389,7 +416,8 @@ private:
                                    const std::size_t length,
                                    const std::size_t line,
                                    const std::size_t column) const {
-        return {kind, source_.substr(start, length), line, column};
+        return {kind, std::string(source_.substr(start, length)), line, column,
+                std::string(filename_)};
     }
 
     [[noreturn]] void fail(const std::size_t line, const std::size_t column,
@@ -400,7 +428,8 @@ private:
 };
 
 struct Expr {
-    enum class Kind { literal, variable, call, cast, unary, binary } kind{};
+    enum class Kind { literal, variable, member, call, cast, unary, binary }
+        kind{};
     Token token;
     std::uint64_t bits{};
     ValueType value_type{ValueType::i64};
@@ -417,6 +446,8 @@ struct Stmt {
         block,
         variable,
         assign,
+        field_assign,
+        indirect_assign,
         expression,
         return_value,
         if_statement,
@@ -425,6 +456,9 @@ struct Stmt {
     Token token;
     std::string name;
     ValueType value_type{ValueType::i64};
+    std::uint8_t pointer_depth{};
+    std::string class_name;
+    std::unique_ptr<Expr> target;
     std::unique_ptr<Expr> expression;
     std::unique_ptr<Stmt> first;
     std::unique_ptr<Stmt> second;
@@ -435,29 +469,58 @@ struct Function {
     Token name;
     ValueType return_type{ValueType::i64};
     std::uint8_t complexity{};
+    std::string class_name;
     std::vector<std::unique_ptr<Stmt>> body;
+};
+
+struct Field {
+    Token name;
+    ValueType type{ValueType::i64};
+    std::uint8_t pointer_depth{};
+};
+
+struct Class {
+    Token name;
+    std::vector<Field> fields;
+    std::vector<Function> methods;
+};
+
+struct Import {
+    Token name;
+};
+
+struct ParsedModule {
+    std::vector<Import> imports;
+    std::vector<Class> classes;
+    std::vector<Function> functions;
 };
 
 class Parser {
 public:
     Parser(const std::string_view source, const std::string_view filename)
-        : lexer_(source, filename), filename_(filename), current_(lexer_.next()),
+        : lexer_(source, filename), current_(lexer_.next()),
           next_(lexer_.next()) {}
 
-    std::vector<Function> parse_program() {
-        std::vector<Function> functions;
+    ParsedModule parse_program() {
+        ParsedModule module;
         while (current_.kind != TokenKind::end) {
-            functions.push_back(parse_function());
+            if (match(TokenKind::import_kw)) {
+                const auto name =
+                    consume(TokenKind::identifier, "expected module name");
+                consume(TokenKind::semicolon,
+                        "expected ';' after import name");
+                module.imports.push_back({name});
+            } else if (current_.kind == TokenKind::class_kw) {
+                module.classes.push_back(parse_class());
+            } else {
+                module.functions.push_back(parse_function());
+            }
         }
-        if (functions.empty()) {
-            fail(current_, "expected at least one function");
-        }
-        return functions;
+        return module;
     }
 
 private:
     Lexer lexer_;
-    std::string_view filename_;
     Token current_;
     Token next_;
 
@@ -485,14 +548,15 @@ private:
 
     [[noreturn]] void fail(const Token& token,
                            const std::string_view message) const {
-        throw CompileError(std::string(filename_) + ':' +
+        throw CompileError(token.filename + ':' +
                            std::to_string(token.line) + ':' +
                            std::to_string(token.column) + ": " +
                            std::string(message));
     }
 
-    Function parse_function() {
+    Function parse_function(const std::string_view class_name = {}) {
         Function function;
+        function.class_name = class_name;
         bool has_complexity = false;
         while (match(TokenKind::at)) {
             const auto decorator =
@@ -539,6 +603,39 @@ private:
         return function;
     }
 
+    Class parse_class() {
+        consume(TokenKind::class_kw, "expected 'class'");
+        Class declaration;
+        declaration.name =
+            consume(TokenKind::identifier, "expected class name");
+        consume(TokenKind::left_brace, "expected '{' after class name");
+        while (current_.kind != TokenKind::right_brace &&
+               current_.kind != TokenKind::end) {
+            if (current_.kind == TokenKind::type_kw) {
+                const auto type = current_;
+                advance();
+                std::uint8_t pointer_depth = 0;
+                while (match(TokenKind::star)) {
+                    if (pointer_depth ==
+                        std::numeric_limits<std::uint8_t>::max()) {
+                        fail(type, "pointer type has too many indirections");
+                    }
+                    ++pointer_depth;
+                }
+                const auto name =
+                    consume(TokenKind::identifier, "expected field name");
+                consume(TokenKind::semicolon, "expected ';' after field");
+                declaration.fields.push_back(
+                    {name, value_type_from_name(type.text), pointer_depth});
+                continue;
+            }
+            declaration.methods.push_back(
+                parse_function(declaration.name.text));
+        }
+        consume(TokenKind::right_brace, "expected '}' after class body");
+        return declaration;
+    }
+
     std::vector<std::unique_ptr<Stmt>> parse_block_contents() {
         consume(TokenKind::left_brace, "expected '{'");
         std::vector<std::unique_ptr<Stmt>> statements;
@@ -566,12 +663,28 @@ private:
             consume(TokenKind::semicolon, "expected ';' after return value");
             return statement;
         }
-        if (current_.kind == TokenKind::type_kw) {
+        if (current_.kind == TokenKind::type_kw ||
+            (current_.kind == TokenKind::identifier &&
+             (next_.kind == TokenKind::identifier ||
+              next_.kind == TokenKind::star))) {
             auto statement = std::make_unique<Stmt>();
             statement->kind = Stmt::Kind::variable;
             statement->token = current_;
-            statement->value_type = value_type_from_name(current_.text);
+            if (current_.kind == TokenKind::type_kw) {
+                statement->value_type = value_type_from_name(current_.text);
+            } else {
+                statement->value_type = ValueType::u64;
+                statement->class_name = current_.text;
+            }
             advance();
+            while (match(TokenKind::star)) {
+                if (statement->pointer_depth ==
+                    std::numeric_limits<std::uint8_t>::max()) {
+                    fail(statement->token,
+                         "pointer type has too many indirections");
+                }
+                ++statement->pointer_depth;
+            }
             const auto name =
                 consume(TokenKind::identifier, "expected variable name");
             statement->name = name.text;
@@ -605,24 +718,31 @@ private:
             statement->first = parse_statement();
             return statement;
         }
-        if (current_.kind == TokenKind::identifier &&
-            next_.kind == TokenKind::assign) {
-            auto statement = std::make_unique<Stmt>();
-            statement->kind = Stmt::Kind::assign;
-            statement->token = current_;
-            statement->name = current_.text;
-            advance();
-            advance();
-            statement->expression = parse_expression();
-            consume(TokenKind::semicolon, "expected ';' after assignment");
-            return statement;
-        }
-
         auto statement = std::make_unique<Stmt>();
         statement->kind = Stmt::Kind::expression;
         statement->token = current_;
-        statement->expression = parse_expression();
-        consume(TokenKind::semicolon, "expected ';' after expression");
+        auto first_expression = parse_expression();
+        if (match(TokenKind::assign)) {
+            const bool indirect =
+                first_expression->kind == Expr::Kind::unary &&
+                first_expression->op == TokenKind::star;
+            if (first_expression->kind != Expr::Kind::variable &&
+                first_expression->kind != Expr::Kind::member && !indirect) {
+                fail(first_expression->token, "invalid assignment target");
+            }
+            statement->kind =
+                indirect ? Stmt::Kind::indirect_assign
+                         : (first_expression->kind == Expr::Kind::member
+                                ? Stmt::Kind::field_assign
+                                : Stmt::Kind::assign);
+            statement->name = first_expression->name;
+            statement->target = std::move(first_expression);
+            statement->expression = parse_expression();
+            consume(TokenKind::semicolon, "expected ';' after assignment");
+        } else {
+            statement->expression = std::move(first_expression);
+            consume(TokenKind::semicolon, "expected ';' after expression");
+        }
         return statement;
     }
 
@@ -669,7 +789,9 @@ private:
 
     std::unique_ptr<Expr> parse_unary() {
         if (current_.kind == TokenKind::minus ||
-            current_.kind == TokenKind::bang) {
+            current_.kind == TokenKind::bang ||
+            current_.kind == TokenKind::ampersand ||
+            current_.kind == TokenKind::star) {
             auto expression = std::make_unique<Expr>();
             expression->kind = Expr::Kind::unary;
             expression->token = current_;
@@ -678,7 +800,33 @@ private:
             expression->right = parse_unary();
             return expression;
         }
-        return parse_primary();
+        return parse_postfix();
+    }
+
+    std::unique_ptr<Expr> parse_postfix() {
+        auto expression = parse_primary();
+        while (match(TokenKind::dot)) {
+            const auto member =
+                consume(TokenKind::identifier, "expected member name");
+            auto access = std::make_unique<Expr>();
+            access->token = member;
+            access->name = member.text;
+            access->left = std::move(expression);
+            if (match(TokenKind::left_paren)) {
+                access->kind = Expr::Kind::call;
+                if (current_.kind != TokenKind::right_paren) {
+                    do {
+                        access->arguments.push_back(parse_expression());
+                    } while (match(TokenKind::comma));
+                }
+                consume(TokenKind::right_paren,
+                        "expected ')' after method arguments");
+            } else {
+                access->kind = Expr::Kind::member;
+            }
+            expression = std::move(access);
+        }
+        return expression;
     }
 
     std::unique_ptr<Expr> parse_primary() {
@@ -836,6 +984,160 @@ private:
     }
 };
 
+struct LoadedProgram {
+    std::vector<Class> classes;
+    std::vector<Function> functions;
+    bool has_std{};
+};
+
+class ModuleLoader {
+public:
+    ModuleLoader(const std::string_view filename,
+                 const std::string_view module_root)
+        : root_display_(filename), module_root_(module_root) {
+        if (!filename.empty() && filename.front() != '<') {
+            root_path_ = std::filesystem::absolute(
+                             std::filesystem::path(filename))
+                             .lexically_normal();
+            root_directory_ = root_path_.parent_path();
+        } else {
+            root_directory_ = std::filesystem::current_path();
+        }
+    }
+
+    LoadedProgram load(const std::string_view source) {
+        const auto root_key = root_path_.empty()
+                                  ? std::string("<root>")
+                                  : path_key(root_path_);
+        load_source(source, root_path_, root_display_, root_key);
+        if (functions_.empty()) {
+            throw CompileError(root_display_ + ": expected at least one function");
+        }
+        return {std::move(classes_), std::move(functions_), has_std_};
+    }
+
+private:
+    std::string root_display_;
+    std::filesystem::path root_path_;
+    std::filesystem::path root_directory_;
+    std::filesystem::path module_root_;
+    std::vector<Class> classes_;
+    std::vector<Function> functions_;
+    std::unordered_set<std::string> loaded_;
+    std::unordered_set<std::string> active_;
+    bool has_std_{};
+
+    static std::string path_key(const std::filesystem::path& path) {
+        std::error_code error;
+        auto normalized = std::filesystem::weakly_canonical(path, error);
+        if (error) {
+            normalized = std::filesystem::absolute(path).lexically_normal();
+        }
+#ifdef _WIN32
+        auto key = normalized.generic_string();
+        std::transform(key.begin(), key.end(), key.begin(),
+                       [](const unsigned char character) {
+                           return static_cast<char>(std::tolower(character));
+                       });
+        return key;
+#else
+        return normalized.generic_string();
+#endif
+    }
+
+    std::filesystem::path resolve(const Import& import,
+                                  const std::filesystem::path& importer) const {
+        auto module_name = std::string(import.name.text);
+        std::size_t separator = 0;
+        while ((separator = module_name.find("::", separator)) !=
+               std::string::npos) {
+            module_name.replace(separator, 2, "/");
+            ++separator;
+        }
+        const auto filename = std::filesystem::path(module_name + ".concept");
+        std::vector<std::filesystem::path> candidates;
+        if (!importer.empty()) {
+            const auto directory = importer.parent_path();
+            candidates.push_back(directory / "concept" / filename);
+            if (directory.filename() == "concept") {
+                candidates.push_back(directory / filename);
+            }
+        }
+        candidates.push_back(root_directory_ / "concept" / filename);
+        if (!module_root_.empty()) {
+            candidates.push_back(module_root_ / filename);
+        }
+        candidates.push_back(std::filesystem::current_path() / "concept" /
+                             filename);
+
+        std::unordered_set<std::string> visited;
+        for (const auto& candidate : candidates) {
+            const auto key = path_key(candidate);
+            if (!visited.insert(key).second) {
+                continue;
+            }
+            std::error_code error;
+            if (std::filesystem::is_regular_file(candidate, error) && !error) {
+                return std::filesystem::absolute(candidate).lexically_normal();
+            }
+        }
+
+        throw CompileError(import.name.filename + ':' +
+                           std::to_string(import.name.line) + ':' +
+                           std::to_string(import.name.column) +
+                           ": cannot find module '" +
+                           std::string(import.name.text) + "'");
+    }
+
+    void load_import(const Import& import,
+                     const std::filesystem::path& importer) {
+        const auto path = resolve(import, importer);
+        const auto key = path_key(path);
+        if (active_.contains(key)) {
+            throw CompileError(import.name.filename + ':' +
+                               std::to_string(import.name.line) + ':' +
+                               std::to_string(import.name.column) +
+                               ": import cycle through module '" +
+                               std::string(import.name.text) + "'");
+        }
+        if (loaded_.contains(key)) {
+            return;
+        }
+
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) {
+            throw CompileError("cannot open imported module: " + path.string());
+        }
+        const std::string imported_source{
+            std::istreambuf_iterator<char>{stream},
+            std::istreambuf_iterator<char>{}};
+        load_source(imported_source, path, path.string(), key);
+    }
+
+    void load_source(const std::string_view source,
+                     const std::filesystem::path& path,
+                     const std::string& display_name,
+                     const std::string& key) {
+        active_.insert(key);
+        Parser parser(source, display_name);
+        auto module = parser.parse_program();
+        for (const auto& import : module.imports) {
+            if (import.name.text == "std::socket") {
+                has_std_ = true;
+            }
+            load_import(import, path);
+        }
+        for (auto& declaration : module.classes) {
+            classes_.push_back(std::move(declaration));
+        }
+        for (auto& function : module.functions) {
+            functions_.push_back(std::move(function));
+        }
+        active_.erase(key);
+        loaded_.insert(key);
+    }
+};
+
 struct FunctionInfo {
     std::uint32_t entry{};
     std::uint32_t locals{};
@@ -845,6 +1147,27 @@ struct FunctionInfo {
 struct LocalInfo {
     std::uint16_t index{};
     ValueType type{ValueType::i64};
+    std::string class_name;
+    std::uint8_t pointer_depth{};
+};
+
+struct FieldInfo {
+    std::uint16_t index{};
+    ValueType type{ValueType::i64};
+    std::uint8_t pointer_depth{};
+};
+
+struct SemanticType {
+    ValueType type{ValueType::i64};
+    std::string class_name;
+    std::uint8_t pointer_depth{};
+};
+
+struct ClassInfo {
+    std::uint16_t field_count{};
+    std::unordered_map<std::string, FieldInfo> fields;
+    std::unordered_map<std::string, std::string> methods;
+    bool native_socket{};
 };
 
 struct CallPatch {
@@ -856,13 +1179,22 @@ struct CallPatch {
 
 class CodeGenerator {
 public:
-    CodeGenerator(std::vector<Function>& functions, const std::string_view filename)
-        : functions_(functions), filename_(filename) {}
+    CodeGenerator(std::vector<Class>& classes,
+                  std::vector<Function>& functions,
+                  const std::string_view filename, const bool has_std)
+        : classes_(classes), functions_(functions), filename_(filename),
+          has_std_(has_std) {}
 
     Bytecode generate() {
+        register_classes();
         register_functions();
         for (const auto& function : functions_) {
             compile_function(function);
+        }
+        for (const auto& declaration : classes_) {
+            for (const auto& method : declaration.methods) {
+                compile_function(method);
+            }
         }
         resolve_calls();
 
@@ -888,23 +1220,79 @@ public:
     }
 
 private:
+    std::vector<Class>& classes_;
     std::vector<Function>& functions_;
     std::string_view filename_;
     std::vector<std::uint8_t> code_;
     std::unordered_map<std::string, FunctionInfo> function_info_;
+    std::unordered_map<std::string, ClassInfo> class_info_;
     std::unordered_map<std::string, LocalInfo> locals_;
     std::vector<CallPatch> call_patches_;
     std::vector<std::string> strings_;
     ValueType current_return_type_{ValueType::i64};
+    std::string current_class_;
     std::uint8_t current_complexity_{};
     std::uint32_t obfuscation_credit_{};
     std::uint64_t obfuscation_state_{fresh_opcode_seed()};
+    bool has_std_{};
 
     [[noreturn]] void fail(const Token& token,
                            const std::string& message) const {
-        throw CompileError(std::string(filename_) + ':' +
+        throw CompileError(token.filename + ':' +
                            std::to_string(token.line) + ':' +
                            std::to_string(token.column) + ": " + message);
+    }
+
+    static std::string function_key(const Function& function) {
+        return function.class_name.empty()
+                   ? function.name.text
+                   : function.class_name + "." + function.name.text;
+    }
+
+    void register_classes() {
+        if (has_std_) {
+            ClassInfo socket;
+            socket.native_socket = true;
+            class_info_.emplace("std::Socket", std::move(socket));
+        }
+        for (const auto& declaration : classes_) {
+            const auto name = declaration.name.text;
+            if (is_builtin_name(name)) {
+                fail(declaration.name,
+                     "class name '" + name + "' is reserved by the VM");
+            }
+            if (declaration.fields.size() >
+                std::numeric_limits<std::uint16_t>::max()) {
+                fail(declaration.name, "class has too many fields");
+            }
+            ClassInfo info;
+            info.field_count =
+                static_cast<std::uint16_t>(declaration.fields.size());
+            for (std::size_t index = 0; index < declaration.fields.size();
+                 ++index) {
+                const auto& field = declaration.fields[index];
+                if (!info.fields
+                         .emplace(field.name.text,
+                                  FieldInfo{static_cast<std::uint16_t>(index),
+                                            field.type,
+                                            field.pointer_depth})
+                         .second) {
+                    fail(field.name,
+                         "duplicate field '" + field.name.text + "'");
+                }
+            }
+            for (const auto& method : declaration.methods) {
+                if (!info.methods
+                         .emplace(method.name.text, function_key(method))
+                         .second) {
+                    fail(method.name,
+                         "duplicate method '" + method.name.text + "'");
+                }
+            }
+            if (!class_info_.emplace(name, std::move(info)).second) {
+                fail(declaration.name, "duplicate class '" + name + "'");
+            }
+        }
     }
 
     void register_functions() {
@@ -914,6 +1302,10 @@ private:
                 fail(function.name,
                      "function name '" + name + "' is reserved by the VM");
             }
+            if (class_info_.contains(name)) {
+                fail(function.name,
+                     "function conflicts with class '" + name + "'");
+            }
             if (!function_info_
                      .emplace(name,
                               FunctionInfo{0, 0, function.return_type})
@@ -921,15 +1313,27 @@ private:
                 fail(function.name, "duplicate function '" + name + "'");
             }
         }
+        for (const auto& declaration : classes_) {
+            for (const auto& method : declaration.methods) {
+                const auto key = function_key(method);
+                function_info_.emplace(
+                    key, FunctionInfo{0, 0, method.return_type});
+            }
+        }
     }
 
     void compile_function(const Function& function) {
-        auto& info = function_info_.at(std::string(function.name.text));
+        auto& info = function_info_.at(function_key(function));
         info.entry = checked_offset();
         current_return_type_ = function.return_type;
+        current_class_ = function.class_name;
         current_complexity_ = function.complexity;
         obfuscation_credit_ = 0;
         locals_.clear();
+        if (!current_class_.empty()) {
+            locals_.emplace(
+                "this", LocalInfo{0, ValueType::u64, current_class_, 0});
+        }
         if (current_complexity_ != 0) {
             emit_obfuscation_layer();
         }
@@ -961,8 +1365,32 @@ private:
             }
             const auto index = static_cast<std::uint16_t>(locals_.size());
             locals_.emplace(statement.name,
-                            LocalInfo{index, statement.value_type});
-            if (statement.expression) {
+                            LocalInfo{index, statement.value_type,
+                                      statement.class_name,
+                                      statement.pointer_depth});
+            if (statement.pointer_depth != 0) {
+                if (!statement.class_name.empty()) {
+                    lookup_class(statement.token, statement.class_name);
+                }
+                if (statement.expression) {
+                    compile_pointer_expression_as(
+                        *statement.expression,
+                        SemanticType{statement.value_type,
+                                     statement.class_name,
+                                     statement.pointer_depth});
+                } else {
+                    emit(Op::push_bits);
+                    emit_u64(0);
+                }
+            } else if (!statement.class_name.empty()) {
+                lookup_class(statement.token, statement.class_name);
+                if (statement.expression) {
+                    compile_object_expression_as(*statement.expression,
+                                                 statement.class_name);
+                } else {
+                    emit_new_object(statement.class_name);
+                }
+            } else if (statement.expression) {
                 compile_expression_as(*statement.expression,
                                       statement.value_type);
             } else {
@@ -974,9 +1402,55 @@ private:
         }
         case Stmt::Kind::assign: {
             const auto& local = lookup_local(statement.token, statement.name);
-            compile_expression_as(*statement.expression, local.type);
+            if (local.pointer_depth != 0) {
+                compile_pointer_expression_as(
+                    *statement.expression,
+                    SemanticType{local.type, local.class_name,
+                                 local.pointer_depth});
+            } else if (local.class_name.empty()) {
+                compile_expression_as(*statement.expression, local.type);
+            } else {
+                compile_object_expression_as(*statement.expression,
+                                             local.class_name);
+            }
             emit(Op::store);
             emit_u16(local.index);
+            return;
+        }
+        case Stmt::Kind::field_assign: {
+            const auto class_name =
+                expression_class(*statement.target->left);
+            if (class_name.empty()) {
+                fail(statement.target->token,
+                     "field assignment requires a class object");
+            }
+            const auto& field = lookup_field(statement.target->token,
+                                             class_name, statement.name);
+            compile_object_expression_as(*statement.target->left, class_name);
+            if (field.pointer_depth != 0) {
+                compile_pointer_expression_as(
+                    *statement.expression,
+                    SemanticType{field.type, {}, field.pointer_depth});
+            } else {
+                compile_expression_as(*statement.expression, field.type);
+            }
+            emit(Op::store_field);
+            emit_u16(field.index);
+            return;
+        }
+        case Stmt::Kind::indirect_assign: {
+            const auto pointer_type =
+                semantic_type(*statement.target->right);
+            if (pointer_type.pointer_depth == 0) {
+                fail(statement.target->token,
+                     "indirect assignment requires a pointer");
+            }
+            static_cast<void>(compile_expression(*statement.target->right));
+            auto target_type = pointer_type;
+            --target_type.pointer_depth;
+            compile_semantic_expression_as(*statement.expression,
+                                           target_type);
+            emit(Op::store_indirect);
             return;
         }
         case Stmt::Kind::expression:
@@ -1032,9 +1506,55 @@ private:
             const auto& local = lookup_local(expression.token, expression.name);
             emit(Op::load);
             emit_u16(local.index);
-            return local.type;
+            return local.pointer_depth == 0 ? local.type : ValueType::u64;
+        }
+        case Expr::Kind::member: {
+            const auto class_name = expression_class(*expression.left);
+            if (class_name.empty()) {
+                fail(expression.token,
+                     "field access requires a class object");
+            }
+            const auto& field =
+                lookup_field(expression.token, class_name, expression.name);
+            compile_object_expression_as(*expression.left, class_name);
+            emit(Op::load_field);
+            emit_u16(field.index);
+            return field.pointer_depth == 0 ? field.type : ValueType::u64;
         }
         case Expr::Kind::call: {
+            if (expression.left) {
+                const auto class_name = expression_class(*expression.left);
+                if (class_name.empty()) {
+                    fail(expression.token,
+                         "method call requires a class object");
+                }
+                if (is_native_socket_class(class_name)) {
+                    return compile_socket_method(expression);
+                }
+                if (!expression.arguments.empty()) {
+                    fail(expression.token,
+                         "method parameters are not supported yet");
+                }
+                const auto& method = lookup_method(
+                    expression.token, class_name, expression.name);
+                const auto& function =
+                    lookup_function(expression.token, method);
+                compile_object_expression_as(*expression.left, class_name);
+                emit(Op::call_method);
+                const auto target_offset = reserve_u32();
+                const auto locals_offset = reserve_u32();
+                call_patches_.push_back({target_offset, locals_offset,
+                                         expression.token, method});
+                return function.return_type;
+            }
+            if (class_info_.contains(expression.name)) {
+                if (!expression.arguments.empty()) {
+                    fail(expression.token,
+                         "constructors do not accept arguments yet");
+                }
+                emit_new_object(expression.name);
+                return ValueType::u64;
+            }
             if (is_builtin_name(expression.name)) {
                 return compile_builtin(expression);
             }
@@ -1052,13 +1572,43 @@ private:
             return function.return_type;
         }
         case Expr::Kind::cast: {
+            static_cast<void>(semantic_type(expression));
             const auto source_type = compile_expression(*expression.right);
             emit_conversion(source_type, expression.value_type,
                             expression.token);
             return expression.value_type;
         }
         case Expr::Kind::unary: {
-            const auto operand_type = expression_type(*expression.right);
+            if (expression.op == TokenKind::ampersand) {
+                static_cast<void>(semantic_type(expression));
+                compile_address(*expression.right);
+                return ValueType::u64;
+            }
+            if (expression.op == TokenKind::star) {
+                auto pointer_type = semantic_type(*expression.right);
+                if (pointer_type.pointer_depth == 0) {
+                    fail(expression.token,
+                         "dereference operator requires a pointer");
+                }
+                static_cast<void>(compile_expression(*expression.right));
+                emit(Op::load_indirect);
+                --pointer_type.pointer_depth;
+                return pointer_type.pointer_depth != 0 ||
+                               !pointer_type.class_name.empty()
+                           ? ValueType::u64
+                           : pointer_type.type;
+            }
+            const auto operand = semantic_type(*expression.right);
+            if (operand.pointer_depth != 0) {
+                fail(expression.token,
+                     "unary operator cannot use a pointer");
+            }
+            if (!operand.class_name.empty()) {
+                fail(expression.token,
+                     "unary operator cannot use class object '" +
+                         operand.class_name + "'");
+            }
+            const auto operand_type = operand.type;
             static_cast<void>(compile_expression(*expression.right));
             if (expression.op == TokenKind::bang) {
                 emit(Op::logical_not);
@@ -1092,11 +1642,218 @@ private:
 
     void compile_expression_as(const Expr& expression,
                                const ValueType target_type) {
+        const auto source = semantic_type(expression);
+        if (source.pointer_depth != 0) {
+            fail(expression.token,
+                 "pointer cannot be used as a core value");
+        }
+        if (!source.class_name.empty()) {
+            fail(expression.token, "class object '" + source.class_name +
+                                       "' cannot be used as a core value");
+        }
         const auto source_type = compile_expression(expression);
         emit_conversion(source_type, target_type, expression.token);
     }
 
-    [[nodiscard]] static bool is_builtin_name(const std::string_view name) {
+    [[nodiscard]] SemanticType semantic_type(const Expr& expression) const {
+        switch (expression.kind) {
+        case Expr::Kind::literal:
+            return {expression.value_type, {}, 0};
+        case Expr::Kind::variable: {
+            const auto& local =
+                lookup_local(expression.token, expression.name);
+            return {local.type, local.class_name, local.pointer_depth};
+        }
+        case Expr::Kind::member: {
+            const auto class_name = expression_class(*expression.left);
+            if (class_name.empty()) {
+                fail(expression.token,
+                     "field access requires a class object");
+            }
+            const auto& field =
+                lookup_field(expression.token, class_name, expression.name);
+            return {field.type, {}, field.pointer_depth};
+        }
+        case Expr::Kind::call:
+            if (expression.left) {
+                const auto class_name = expression_class(*expression.left);
+                if (class_name.empty()) {
+                    fail(expression.token,
+                         "method call requires a class object");
+                }
+                if (is_native_socket_class(class_name)) {
+                    const auto type = socket_method_type(expression);
+                    return expression.name == "accept"
+                               ? SemanticType{type, "std::Socket", 0}
+                               : SemanticType{type, {}, 0};
+                }
+                if (!expression.arguments.empty()) {
+                    fail(expression.token,
+                         "method parameters are not supported yet");
+                }
+                const auto& method = lookup_method(
+                    expression.token, class_name, expression.name);
+                return {lookup_function(expression.token, method).return_type,
+                        {}, 0};
+            }
+            if (class_info_.contains(expression.name)) {
+                if (!expression.arguments.empty()) {
+                    fail(expression.token,
+                         "constructors do not accept arguments yet");
+                }
+                return {ValueType::u64, expression.name, 0};
+            }
+            if (is_builtin_name(expression.name)) {
+                return {builtin_type(expression), {}, 0};
+            }
+            if (!expression.arguments.empty()) {
+                fail(expression.token,
+                     "user-defined function parameters are not supported yet");
+            }
+            return {lookup_function(expression.token, expression.name)
+                        .return_type,
+                    {}, 0};
+        case Expr::Kind::cast: {
+            const auto source = semantic_type(*expression.right);
+            if (source.pointer_depth != 0) {
+                fail(expression.token, "cannot cast a pointer");
+            }
+            if (!source.class_name.empty()) {
+                fail(expression.token, "cannot cast class object '" +
+                                           source.class_name + "'");
+            }
+            return {expression.value_type, {}, 0};
+        }
+        case Expr::Kind::unary: {
+            auto operand = semantic_type(*expression.right);
+            if (expression.op == TokenKind::ampersand) {
+                const bool addressable =
+                    expression.right->kind == Expr::Kind::variable ||
+                    expression.right->kind == Expr::Kind::member ||
+                    (expression.right->kind == Expr::Kind::unary &&
+                     expression.right->op == TokenKind::star);
+                if (!addressable) {
+                    fail(expression.token,
+                         "address-of operator requires a variable, field, or "
+                         "dereference");
+                }
+                if (operand.pointer_depth ==
+                    std::numeric_limits<std::uint8_t>::max()) {
+                    fail(expression.token,
+                         "pointer type has too many indirections");
+                }
+                ++operand.pointer_depth;
+                return operand;
+            }
+            if (expression.op == TokenKind::star) {
+                if (operand.pointer_depth == 0) {
+                    fail(expression.token,
+                         "dereference operator requires a pointer");
+                }
+                --operand.pointer_depth;
+                return operand;
+            }
+            if (operand.pointer_depth != 0) {
+                fail(expression.token,
+                     "unary operator cannot use a pointer");
+            }
+            if (!operand.class_name.empty()) {
+                fail(expression.token,
+                     "unary operator cannot use a class object");
+            }
+            if (expression.op == TokenKind::bang) {
+                return {ValueType::boolean, {}, 0};
+            }
+            if (!is_numeric(operand.type)) {
+                fail(expression.token,
+                     "unary '-' requires a numeric operand");
+            }
+            return operand;
+        }
+        case Expr::Kind::binary: {
+            const auto left = semantic_type(*expression.left);
+            const auto right = semantic_type(*expression.right);
+            if (left.pointer_depth != 0 || right.pointer_depth != 0) {
+                fail(expression.token,
+                     "pointers cannot be used with binary operators");
+            }
+            if (!left.class_name.empty() || !right.class_name.empty()) {
+                fail(expression.token,
+                     "class objects cannot be used with binary operators");
+            }
+            if (is_comparison(expression.op)) {
+                static_cast<void>(comparison_operand_type(
+                    expression, left.type, right.type));
+                return {ValueType::boolean, {}, 0};
+            }
+            const auto type =
+                common_numeric_type(expression, left.type, right.type);
+            if (expression.op == TokenKind::percent && is_floating(type)) {
+                fail(expression.token,
+                     "operator '%' requires integral operands");
+            }
+            return {type, {}, 0};
+        }
+        }
+        throw std::logic_error("invalid expression kind");
+    }
+
+    void compile_pointer_expression_as(const Expr& expression,
+                                       const SemanticType& expected) {
+        const auto actual = semantic_type(expression);
+        if (actual.pointer_depth == 0) {
+            fail(expression.token, "expected a pointer value");
+        }
+        if (actual.pointer_depth != expected.pointer_depth ||
+            actual.type != expected.type ||
+            actual.class_name != expected.class_name) {
+            fail(expression.token, "incompatible pointer type");
+        }
+        static_cast<void>(compile_expression(expression));
+    }
+
+    void compile_semantic_expression_as(const Expr& expression,
+                                        const SemanticType& expected) {
+        if (expected.pointer_depth != 0) {
+            compile_pointer_expression_as(expression, expected);
+        } else if (!expected.class_name.empty()) {
+            compile_object_expression_as(expression, expected.class_name);
+        } else {
+            compile_expression_as(expression, expected.type);
+        }
+    }
+
+    void compile_address(const Expr& expression) {
+        if (expression.kind == Expr::Kind::variable) {
+            const auto& local =
+                lookup_local(expression.token, expression.name);
+            emit(Op::address_local);
+            emit_u16(local.index);
+            return;
+        }
+        if (expression.kind == Expr::Kind::member) {
+            const auto class_name = expression_class(*expression.left);
+            if (class_name.empty()) {
+                fail(expression.token,
+                     "field address requires a class object");
+            }
+            const auto& field =
+                lookup_field(expression.token, class_name, expression.name);
+            compile_object_expression_as(*expression.left, class_name);
+            emit(Op::address_field);
+            emit_u16(field.index);
+            return;
+        }
+        if (expression.kind == Expr::Kind::unary &&
+            expression.op == TokenKind::star) {
+            static_cast<void>(compile_expression(*expression.right));
+            return;
+        }
+        fail(expression.token,
+             "address-of operator requires a variable, field, or dereference");
+    }
+
+    [[nodiscard]] bool is_builtin_name(const std::string_view name) const {
         return name == "input" || name == "input_text" ||
                name == "input_i64" || name == "input_f64" ||
                name == "print" || name == "println";
@@ -1127,7 +1884,15 @@ private:
         }
         if (expression.name == "print" || expression.name == "println") {
             require_arguments(1);
-            static_cast<void>(expression_type(*expression.arguments.front()));
+            const auto argument =
+                semantic_type(*expression.arguments.front());
+            if (argument.pointer_depth != 0) {
+                fail(expression.token, "cannot print a pointer");
+            }
+            if (!argument.class_name.empty()) {
+                fail(expression.token, "cannot print class object '" +
+                                           argument.class_name + "'");
+            }
             return ValueType::i64;
         }
         throw std::logic_error("invalid Concept builtin");
@@ -1148,7 +1913,6 @@ private:
             emit(Op::input_f64);
             return result_type;
         }
-
         const auto argument_type =
             compile_expression(*expression.arguments.front());
         emit(expression.name == "print" ? Op::print : Op::println);
@@ -1157,49 +1921,10 @@ private:
     }
 
     [[nodiscard]] ValueType expression_type(const Expr& expression) const {
-        switch (expression.kind) {
-        case Expr::Kind::literal:
-        case Expr::Kind::cast:
-            return expression.value_type;
-        case Expr::Kind::variable:
-            return lookup_local(expression.token, expression.name).type;
-        case Expr::Kind::call:
-            if (is_builtin_name(expression.name)) {
-                return builtin_type(expression);
-            }
-            if (!expression.arguments.empty()) {
-                fail(expression.token,
-                     "user-defined function parameters are not supported yet");
-            }
-            return lookup_function(expression.token, expression.name).return_type;
-        case Expr::Kind::unary: {
-            const auto operand_type = expression_type(*expression.right);
-            if (expression.op == TokenKind::bang) {
-                return ValueType::boolean;
-            }
-            if (!is_numeric(operand_type)) {
-                fail(expression.token, "unary '-' requires a numeric operand");
-            }
-            return operand_type;
-        }
-        case Expr::Kind::binary: {
-            const auto left_type = expression_type(*expression.left);
-            const auto right_type = expression_type(*expression.right);
-            if (is_comparison(expression.op)) {
-                static_cast<void>(comparison_operand_type(
-                    expression, left_type, right_type));
-                return ValueType::boolean;
-            }
-            const auto type =
-                common_numeric_type(expression, left_type, right_type);
-            if (expression.op == TokenKind::percent && is_floating(type)) {
-                fail(expression.token,
-                     "operator '%' requires integral operands");
-            }
-            return type;
-        }
-        }
-        throw std::logic_error("invalid expression kind");
+        const auto result = semantic_type(expression);
+        return result.pointer_depth != 0 || !result.class_name.empty()
+                   ? ValueType::u64
+                   : result.type;
     }
 
     [[nodiscard]] static bool is_comparison(const TokenKind operation) {
@@ -1348,6 +2073,146 @@ private:
             fail(token, "unknown variable '" + name + "'");
         }
         return local->second;
+    }
+
+    const ClassInfo& lookup_class(const Token& token,
+                                  const std::string& name) const {
+        const auto declaration = class_info_.find(name);
+        if (declaration == class_info_.end()) {
+            fail(token, "unknown class '" + name + "'");
+        }
+        return declaration->second;
+    }
+
+    const FieldInfo& lookup_field(const Token& token,
+                                  const std::string& class_name,
+                                  const std::string& name) const {
+        const auto& declaration = lookup_class(token, class_name);
+        const auto field = declaration.fields.find(name);
+        if (field == declaration.fields.end()) {
+            fail(token, "class '" + class_name + "' has no field '" + name +
+                            "'");
+        }
+        return field->second;
+    }
+
+    const std::string& lookup_method(const Token& token,
+                                     const std::string& class_name,
+                                     const std::string& name) const {
+        const auto& declaration = lookup_class(token, class_name);
+        const auto method = declaration.methods.find(name);
+        if (method == declaration.methods.end()) {
+            fail(token, "class '" + class_name + "' has no method '" + name +
+                            "'");
+        }
+        return method->second;
+    }
+
+    bool is_native_socket_class(const std::string& class_name) const {
+        const auto declaration = class_info_.find(class_name);
+        return declaration != class_info_.end() &&
+               declaration->second.native_socket;
+    }
+
+    ValueType socket_method_type(const Expr& expression) const {
+        const auto require_arguments = [&](const std::size_t expected) {
+            if (expression.arguments.size() != expected) {
+                fail(expression.token,
+                     "std::Socket." + expression.name + " expects " +
+                         std::to_string(expected) + " argument" +
+                         (expected == 1 ? "" : "s"));
+            }
+        };
+
+        if (expression.name == "connect" || expression.name == "bind") {
+            require_arguments(2);
+            return ValueType::boolean;
+        }
+        if (expression.name == "listen") {
+            require_arguments(1);
+            return ValueType::boolean;
+        }
+        if (expression.name == "accept") {
+            require_arguments(0);
+            return ValueType::u64;
+        }
+        if (expression.name == "send") {
+            require_arguments(1);
+            return ValueType::i64;
+        }
+        if (expression.name == "recv") {
+            require_arguments(0);
+            return ValueType::text;
+        }
+        if (expression.name == "close") {
+            require_arguments(0);
+            return ValueType::boolean;
+        }
+        if (expression.name == "valid") {
+            require_arguments(0);
+            return ValueType::boolean;
+        }
+        fail(expression.token, "std::Socket has no method '" +
+                                   expression.name + "'");
+    }
+
+    ValueType compile_socket_method(const Expr& expression) {
+        const auto result_type = socket_method_type(expression);
+        compile_object_expression_as(*expression.left, "std::Socket");
+        if (expression.name == "connect" || expression.name == "bind") {
+            compile_expression_as(*expression.arguments[0], ValueType::text);
+            compile_expression_as(*expression.arguments[1], ValueType::u16);
+            emit(expression.name == "connect" ? Op::socket_connect
+                                               : Op::socket_bind);
+        } else if (expression.name == "listen") {
+            compile_expression_as(*expression.arguments[0], ValueType::i32);
+            emit(Op::socket_listen);
+        } else if (expression.name == "accept") {
+            emit(Op::socket_accept);
+        } else if (expression.name == "send") {
+            compile_expression_as(*expression.arguments[0], ValueType::text);
+            emit(Op::socket_send);
+        } else if (expression.name == "recv") {
+            emit(Op::socket_receive);
+        } else if (expression.name == "valid") {
+            emit(Op::push_bits);
+            emit_u64(std::numeric_limits<std::uint64_t>::max());
+            emit(Op::not_equal);
+            emit_type(ValueType::u64);
+        } else {
+            emit(Op::socket_close);
+        }
+        return result_type;
+    }
+
+    std::string expression_class(const Expr& expression) const {
+        const auto result = semantic_type(expression);
+        return result.pointer_depth == 0 ? result.class_name : std::string{};
+    }
+
+    void compile_object_expression_as(const Expr& expression,
+                                      const std::string& expected_class) {
+        const auto actual_class = expression_class(expression);
+        if (actual_class.empty()) {
+            fail(expression.token, "expected object of class '" +
+                                       expected_class + "'");
+        }
+        if (actual_class != expected_class) {
+            fail(expression.token, "cannot use object of class '" +
+                                       actual_class + "' as '" +
+                                       expected_class + "'");
+        }
+        static_cast<void>(compile_expression(expression));
+    }
+
+    void emit_new_object(const std::string& class_name) {
+        const auto& declaration = class_info_.at(class_name);
+        if (declaration.native_socket) {
+            emit(Op::socket_open);
+            return;
+        }
+        emit(Op::new_object);
+        emit_u16(declaration.field_count);
     }
 
     const FunctionInfo& lookup_function(const Token& token,
@@ -1506,13 +2371,16 @@ private:
 } // namespace
 
 Bytecode compile(const std::string_view source, const std::string_view filename,
-                 const std::uint32_t vm_count) {
+                 const std::uint32_t vm_count,
+                 const std::string_view module_root) {
     if (vm_count == 0 || vm_count > 64) {
         throw CompileError("VM count must be between 1 and 64");
     }
-    Parser parser(source, filename);
-    auto functions = parser.parse_program();
-    auto bytecode = CodeGenerator(functions, filename).generate();
+    auto program = ModuleLoader(filename, module_root).load(source);
+    auto bytecode =
+        CodeGenerator(program.classes, program.functions, filename,
+                      program.has_std)
+            .generate();
     bytecode.vm_seeds.reserve(vm_count);
     for (std::uint32_t index = 0; index < vm_count; ++index) {
         bytecode.vm_seeds.push_back(fresh_opcode_seed());

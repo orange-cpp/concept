@@ -1,0 +1,55 @@
+import std::socket;
+
+fn main() -> int {
+    u16 port = 45123;
+    std::Socket server = std::Socket();
+    if (!server.valid()) {
+        return 1;
+    }
+
+    bool bound = server.bind("127.0.0.1", port);
+    while (!bound) {
+        port = port + u16(1);
+        if (port == u16(45223)) {
+            server.close();
+            return 2;
+        }
+        bound = server.bind("127.0.0.1", port);
+    }
+
+    if (!server.listen(4)) {
+        server.close();
+        return 3;
+    }
+
+    std::Socket client = std::Socket();
+    if (!client.valid()) {
+        server.close();
+        return 4;
+    }
+    if (!client.connect("127.0.0.1", port)) {
+        client.close();
+        server.close();
+        return 5;
+    }
+
+    std::Socket peer = server.accept();
+    if (!peer.valid()) {
+        client.close();
+        server.close();
+        return 6;
+    }
+
+    i64 sent = client.send("ping");
+    string received = peer.recv();
+    peer.close();
+    client.close();
+    server.close();
+
+    if (sent == 4) {
+        if (received == "ping") {
+            return 42;
+        }
+    }
+    return 7;
+}

@@ -16,7 +16,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 5;
+constexpr std::uint32_t bytecode_version = 8;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -67,6 +67,11 @@ std::size_t operand_size(const Op op) {
         return 4;
     case Op::load:
     case Op::store:
+    case Op::new_object:
+    case Op::load_field:
+    case Op::store_field:
+    case Op::address_local:
+    case Op::address_field:
         return 2;
     case Op::convert:
         return 2;
@@ -74,6 +79,7 @@ std::size_t operand_size(const Op op) {
     case Op::jump_if_false:
         return 4;
     case Op::call:
+    case Op::call_method:
         return 8;
     case Op::add:
     case Op::subtract:
@@ -92,9 +98,19 @@ std::size_t operand_size(const Op op) {
     case Op::println:
         return 1;
     case Op::pop:
+    case Op::load_indirect:
+    case Op::store_indirect:
     case Op::input_text:
     case Op::input_i64:
     case Op::input_f64:
+    case Op::socket_open:
+    case Op::socket_connect:
+    case Op::socket_bind:
+    case Op::socket_listen:
+    case Op::socket_accept:
+    case Op::socket_send:
+    case Op::socket_receive:
+    case Op::socket_close:
     case Op::return_value:
         return 0;
     }
@@ -516,7 +532,8 @@ void validate(const Bytecode& bytecode) {
             }
         }
 
-        if (op == Op::jump || op == Op::jump_if_false || op == Op::call) {
+        if (op == Op::jump || op == Op::jump_if_false || op == Op::call ||
+            op == Op::call_method) {
             targets.push_back(read_u32(bytecode.code, offset));
         }
         offset += size;

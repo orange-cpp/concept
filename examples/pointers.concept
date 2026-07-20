@@ -1,0 +1,23 @@
+class Box {
+    i32 value;
+    i32* alias;
+}
+
+@complexity(50)
+fn main() -> int {
+    i32 answer = 39;
+    i32* pointer = &answer;
+    *pointer = *pointer + 1;
+
+    i32** pointer_to_pointer = &pointer;
+    **pointer_to_pointer = **pointer_to_pointer + 1;
+
+    Box box;
+    Box* box_pointer = &box;
+    (*box_pointer).value = answer;
+
+    i32* field_pointer = &(*box_pointer).value;
+    *field_pointer = *field_pointer + 1;
+    box.alias = field_pointer;
+    return *box.alias;
+}

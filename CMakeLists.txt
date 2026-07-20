@@ -30,6 +30,11 @@ target_link_libraries(concept-runtime PRIVATE concept_core)
 add_executable(concept src/main.cpp)
 target_link_libraries(concept PRIVATE concept_frontend)
 add_dependencies(concept concept-runtime)
+add_custom_command(TARGET concept POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/concept"
+        "$<TARGET_FILE_DIR:concept>/concept"
+)
 
 if(MINGW)
     foreach(target concept-runtime concept)
@@ -84,5 +89,29 @@ if(BUILD_TESTING)
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-calculator-smoke.exe
             -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/calculator-input.txt
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_calculator.cmake
+    )
+    add_test(
+        NAME concept-packaged-sockets
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/socket-loopback.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-sockets-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-classes
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/classes.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-classes-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-pointers
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/pointers.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-pointers-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
     )
 endif()

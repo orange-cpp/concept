@@ -15,6 +15,7 @@ public:
 
 [[nodiscard]] Bytecode compile(std::string_view source,
                                std::string_view filename = "<input>",
-                               std::uint32_t vm_count = 4);
+                               std::uint32_t vm_count = 4,
+                               std::string_view module_root = {});
 
 } // namespace cpt

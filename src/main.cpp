@@ -62,8 +62,9 @@ int main(const int argc, char** argv) {
 #else
         output_path.replace_extension();
 #endif
-        std::filesystem::path runtime_path =
-            current_executable(argv[0]).parent_path() /
+        const auto compiler_directory =
+            current_executable(argv[0]).parent_path();
+        std::filesystem::path runtime_path = compiler_directory /
 #ifdef _WIN32
             "concept-runtime.exe";
 #else
@@ -103,8 +104,9 @@ int main(const int argc, char** argv) {
         }
 
         const auto source = read_source(source_path);
-        const auto bytecode =
-            cpt::compile(source, source_path.string(), vm_count);
+        const auto module_root = compiler_directory / "concept";
+        const auto bytecode = cpt::compile(source, source_path.string(),
+                                           vm_count, module_root.string());
         const auto image = cpt::serialize(bytecode);
         cpt::package_executable(runtime_path, output_path, image);
         std::cout << "built " << std::filesystem::absolute(output_path).string()

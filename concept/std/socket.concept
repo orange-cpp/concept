@@ -1,0 +1,3 @@
+// Concept standard socket module manifest.
+//
+// Import this module as `import std::socket;` to enable std::Socket.
