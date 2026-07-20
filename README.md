@@ -22,6 +22,29 @@ The first CMake configure downloads a SHA-256-verified, pinned revision of
 [JustasMasiulis/xorstr](https://github.com/JustasMasiulis/xorstr) for native
 runtime string obfuscation.
 
+## GitHub Actions
+
+`Windows CI` builds the x64 MSVC Release configuration and runs the complete
+CTest suite for every push, pull request, and manual run.
+
+`Windows release` builds and tests a release commit, stages a self-contained
+Windows x64 distribution, and attaches a versioned ZIP to the matching GitHub
+release. The archive contains `concept.exe`, both runtime binaries, the
+`concept/std` library sources, the syntax reference, README, and third-party
+notices.
+
+[GitHub does not trigger release workflows for draft-release creation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release).
+To attach the archive while the release is still a draft:
+
+1. Save the draft release in GitHub.
+2. Open **Actions**, select **Windows release**, and choose **Run workflow**.
+3. Enter the draft's exact release tag in `release_tag`.
+
+Publishing a release also runs this workflow automatically and replaces an
+existing archive with a freshly tested build. No additional repository secret
+is required; the workflow grants the built-in `GITHUB_TOKEN` only the repository
+contents permission needed to upload the asset.
+
 ## Compile a Concept program
 
 ```powershell

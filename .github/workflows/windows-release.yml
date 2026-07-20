@@ -1,0 +1,130 @@
+name: Windows release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing draft or published release tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.event.release.tag_name || inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-package-upload:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Resolve release commit
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $encodedTag = [Uri]::EscapeDataString($env:RELEASE_TAG)
+          $releaseJson = gh api --method GET `
+            "repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag"
+          if ($LASTEXITCODE -ne 0) {
+              throw "Release '$env:RELEASE_TAG' does not exist."
+          }
+
+          $release = $releaseJson | ConvertFrom-Json
+          $sourceRef = if ($release.draft) {
+              $release.target_commitish
+          } else {
+              $release.tag_name
+          }
+          $encodedRef = [Uri]::EscapeDataString($sourceRef)
+          $commit = gh api --method GET `
+            "repos/$env:GITHUB_REPOSITORY/commits/$encodedRef" --jq '.sha'
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
+              throw "Cannot resolve release target '$sourceRef'."
+          }
+
+          $safeTag = $release.tag_name -replace '[^A-Za-z0-9._-]', '-'
+          "tag=$($release.tag_name)" >> $env:GITHUB_OUTPUT
+          "commit=$($commit.Trim())" >> $env:GITHUB_OUTPUT
+          "asset_name=concept-$safeTag-windows-x64.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.release.outputs.commit }}
+
+      - name: Configure MSVC Release
+        run: cmake -S . -B build-release -A x64 -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build-release --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build-release -C Release --output-on-failure
+
+      - name: Stage release archive
+        id: package
+        shell: pwsh
+        env:
+          ASSET_NAME: ${{ steps.release.outputs.asset_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $PWD 'dist'
+          $stage = Join-Path $dist 'concept-windows-x64'
+          $binaries = Join-Path $PWD 'build-release\Release'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+          foreach ($name in @(
+              'concept.exe',
+              'concept-runtime.exe',
+              'concept-runtime-shared.dll'
+          )) {
+              $source = Join-Path $binaries $name
+              if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                  throw "Required release binary is missing: $source"
+              }
+              Copy-Item -LiteralPath $source -Destination $stage
+          }
+
+          Copy-Item -LiteralPath 'concept' `
+            -Destination (Join-Path $stage 'concept') -Recurse
+          New-Item -ItemType Directory -Path (Join-Path $stage 'docs') `
+            -Force | Out-Null
+          Copy-Item -LiteralPath 'docs\SYNTAX.md' `
+            -Destination (Join-Path $stage 'docs\SYNTAX.md')
+          Copy-Item -LiteralPath 'README.md', 'THIRD_PARTY_NOTICES.md' `
+            -Destination $stage
+
+          $smokeOutput = Join-Path $dist 'release-smoke.exe'
+          & (Join-Path $stage 'concept.exe') `
+            'examples\dynamic-array.concept' -o $smokeOutput
+          if ($LASTEXITCODE -ne 0 -or
+              -not (Test-Path -LiteralPath $smokeOutput -PathType Leaf)) {
+              throw 'The staged compiler failed its standard-library smoke test.'
+          }
+
+          $archive = Join-Path $dist $env:ASSET_NAME
+          Compress-Archive -LiteralPath $stage -DestinationPath $archive `
+            -CompressionLevel Optimal -Force
+          "archive_path=$archive" >> $env:GITHUB_OUTPUT
+
+      - name: Attach archive to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+        run: |
+          gh release upload $env:RELEASE_TAG $env:ARCHIVE_PATH --clobber `
+            --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to upload '$env:ARCHIVE_PATH'."
+          }
