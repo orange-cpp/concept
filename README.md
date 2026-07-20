@@ -256,6 +256,15 @@ heap. Compiling identical source twice therefore produces different bytecode.
 This is an obfuscation layer, not encryption: the executable necessarily
 contains enough information for its VMs to recover their mappings.
 
+The same per-VM seeds also select handler mutations independently for every
+opcode. Four precompiled handler shapes vary operand extraction and argument
+transfer order, substitute equivalent integral arithmetic and mirrored
+comparisons, and execute different side-effect-free junk calculations. Thus two
+compilations can follow different native handler paths even when their Concept
+behavior is identical. All handler shapes remain present in the packaged native
+runtime, so this raises analysis cost but is not native machine-code mutation or
+a security boundary.
+
 Complexity decorators are also an obfuscation boundary rather than a security
 guarantee. They increase reverse-engineering cost and executable size, but a
 determined analyst can still recover program behavior.

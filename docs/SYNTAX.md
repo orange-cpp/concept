@@ -459,7 +459,12 @@ Only one complexity decorator may be attached to a function.
 
 This decorator raises reverse-engineering cost but is not a security boundary.
 Every compilation also independently randomizes opcode numbers for each VM
-context.
+context. Each VM seed selects one of four equivalent native handler shapes per
+opcode. These shapes may reorder safe operand work, substitute modular integer
+operations or mirrored comparisons, and perform side-effect-free junk
+calculations. Handler selection changes across compilations automatically and
+does not require a decorator. The runtime contains every precompiled shape, so
+this is execution-path obfuscation rather than native machine-code mutation.
 
 ## Built-in input and output
 

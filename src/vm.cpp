@@ -61,6 +61,67 @@ struct HeapBlock {
     std::uint64_t frame_id{};
 };
 
+std::uint64_t mix_handler_state(std::uint64_t value) noexcept {
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+std::uint8_t handler_variant(const std::uint64_t seed,
+                             const Op op) noexcept {
+    const auto domain = static_cast<std::uint64_t>(op) + 1;
+    return static_cast<std::uint8_t>(
+        mix_handler_state(seed ^ (domain * 0x9e3779b97f4a7c15ULL)) & 3);
+}
+
+#if defined(_MSC_VER)
+#define CONCEPT_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define CONCEPT_NOINLINE __attribute__((noinline))
+#else
+#define CONCEPT_NOINLINE
+#endif
+
+CONCEPT_NOINLINE void execute_handler_junk(
+    const std::uint64_t seed, const Op op,
+    const std::size_t instruction_offset, const std::uint8_t variant) {
+    volatile std::uint64_t sink = mix_handler_state(
+        seed ^ static_cast<std::uint64_t>(instruction_offset) ^
+        ((static_cast<std::uint64_t>(op) + 1) << 48));
+    auto value = static_cast<std::uint64_t>(sink);
+    switch (variant) {
+    case 0:
+        value += 0xd6e8feb86659fd93ULL;
+        value = std::rotl(value, 17);
+        value ^= value >> 23;
+        break;
+    case 1:
+        value ^= std::rotl(value, 29);
+        value *= 0xa24baed4963ee407ULL;
+        value += 0x9fb21c651e98df25ULL;
+        break;
+    case 2:
+        value = std::rotr(value ^ 0xc2b2ae3d27d4eb4fULL, 11);
+        value -= value << 7;
+        value ^= 0x165667b19e3779f9ULL;
+        break;
+    default:
+        value = ~value;
+        value += std::rotl(value, 37);
+        value ^= value >> 31;
+        break;
+    }
+    sink = value;
+}
+
+CONCEPT_NOINLINE std::uint64_t
+handler_value_barrier(const std::uint64_t value) {
+    volatile std::uint64_t sink = value;
+    return sink;
+}
+
+#undef CONCEPT_NOINLINE
+
 #ifdef _WIN32
 using NativeSocket = SOCKET;
 constexpr NativeSocket invalid_socket = INVALID_SOCKET;
@@ -862,14 +923,21 @@ std::uint64_t floating_arithmetic(const Op op, const ValueType type,
 
 std::uint64_t integral_arithmetic(const Op op, const ValueType type,
                                   const std::uint64_t left,
-                                  const std::uint64_t right) {
+                                  const std::uint64_t right,
+                                  const bool substituted) {
     const auto lhs = normalize_integral(type, left);
     const auto rhs = normalize_integral(type, right);
     switch (op) {
     case Op::add:
-        return normalize_integral(type, lhs + rhs);
+        return normalize_integral(
+            type, substituted
+                      ? lhs - handler_value_barrier(std::uint64_t{0} - rhs)
+                      : lhs + rhs);
     case Op::subtract:
-        return normalize_integral(type, lhs - rhs);
+        return normalize_integral(
+            type, substituted
+                      ? lhs + handler_value_barrier(std::uint64_t{0} - rhs)
+                      : lhs - rhs);
     case Op::multiply:
         return normalize_integral(type, lhs * rhs);
     case Op::divide:
@@ -908,13 +976,16 @@ std::uint64_t integral_arithmetic(const Op op, const ValueType type,
 
 std::uint64_t arithmetic(const Op op, const ValueType type,
                          const std::uint64_t left,
-                         const std::uint64_t right) {
+                         const std::uint64_t right,
+                         const bool substituted) {
     return is_floating(type) ? floating_arithmetic(op, type, left, right)
-                             : integral_arithmetic(op, type, left, right);
+                             : integral_arithmetic(op, type, left, right,
+                                                   substituted);
 }
 
-bool compare_values(const Op op, const ValueType type,
-                    const std::uint64_t left, const std::uint64_t right) {
+bool compare_values_canonical(const Op op, const ValueType type,
+                              const std::uint64_t left,
+                              const std::uint64_t right) {
     if (type == ValueType::boolean) {
         const bool lhs = left != 0;
         const bool rhs = right != 0;
@@ -999,6 +1070,35 @@ bool compare_values(const Op op, const ValueType type,
     }
     throw std::runtime_error(
         xorstr_("invalid comparison VM operation"));
+}
+
+Op mirrored_comparison(const Op op) {
+    switch (op) {
+    case Op::equal:
+    case Op::not_equal:
+        return op;
+    case Op::less:
+        return Op::greater;
+    case Op::less_equal:
+        return Op::greater_equal;
+    case Op::greater:
+        return Op::less;
+    case Op::greater_equal:
+        return Op::less_equal;
+    default:
+        throw std::logic_error(xorstr_(
+            "invalid comparison handler substitution"));
+    }
+}
+
+bool compare_values(const Op op, const ValueType type,
+                    const std::uint64_t left, const std::uint64_t right,
+                    const bool substituted) {
+    return substituted
+               ? compare_values_canonical(mirrored_comparison(op), type,
+                                          handler_value_barrier(right),
+                                          handler_value_barrier(left))
+               : compare_values_canonical(op, type, left, right);
 }
 
 std::uint64_t negate_value(const ValueType type, const std::uint64_t bits) {
@@ -1157,8 +1257,11 @@ std::int64_t execute(const Bytecode& bytecode) {
     std::size_t ip = bytecode.entry;
     std::vector<VmContext> vm_contexts;
     if (bytecode.vm_regions.empty()) {
+        const auto seed = bytecode.vm_seeds.empty()
+                              ? std::uint64_t{0}
+                              : bytecode.vm_seeds.front();
         vm_contexts.push_back(
-            {0, static_cast<std::uint32_t>(bytecode.code.size()), 0,
+            {0, static_cast<std::uint32_t>(bytecode.code.size()), seed,
              bytecode.code});
     } else {
         vm_contexts.reserve(bytecode.vm_regions.size());
@@ -1196,6 +1299,45 @@ std::int64_t execute(const Bytecode& bytecode) {
         const auto value = stack.back();
         stack.pop_back();
         return value;
+    };
+
+    const auto pop_binary = [&](const bool reordered) {
+        if (!reordered) {
+            const auto right = pop();
+            const auto left = pop();
+            return std::pair{left, right};
+        }
+        if (stack.size() < frames.back().stack_base ||
+            stack.size() - frames.back().stack_base < 2) {
+            throw std::runtime_error(
+                xorstr_("Concept VM operand stack underflow"));
+        }
+        const auto left = stack[stack.size() - 2];
+        const auto right = stack.back();
+        stack.resize(stack.size() - 2);
+        return std::pair{left, right};
+    };
+
+    const auto transfer_arguments = [&](std::vector<std::uint64_t>& locals,
+                                        const std::size_t local_offset,
+                                        const std::size_t argument_count,
+                                        const bool reordered) {
+        if (!reordered) {
+            for (std::size_t index = argument_count; index != 0; --index) {
+                locals[local_offset + index - 1] = pop();
+            }
+            return;
+        }
+        if (stack.size() < frames.back().stack_base ||
+            argument_count > stack.size() - frames.back().stack_base) {
+            throw std::runtime_error(
+                xorstr_("Concept VM operand stack underflow"));
+        }
+        const auto first_argument = stack.end() -
+                                    static_cast<std::ptrdiff_t>(argument_count);
+        std::copy(first_argument, stack.end(),
+                  locals.begin() + static_cast<std::ptrdiff_t>(local_offset));
+        stack.erase(first_argument, stack.end());
     };
 
     const auto object_fields = [&](const std::uint64_t handle)
@@ -1373,8 +1515,13 @@ std::int64_t execute(const Bytecode& bytecode) {
 
     for (;;) {
         const auto& vm = select_vm();
+        const auto instruction_offset = ip;
         const auto local_ip = ip - vm.begin;
         const auto op = static_cast<Op>(vm.owned_code[local_ip]);
+        const auto variant = handler_variant(vm.opcode_seed, op);
+        execute_handler_junk(vm.opcode_seed, op, instruction_offset, variant);
+        const bool reordered = (variant & 1) != 0;
+        const bool substituted = (variant & 2) != 0;
         ++ip;
 
         switch (op) {
@@ -1402,12 +1549,20 @@ std::int64_t execute(const Bytecode& bytecode) {
         }
         case Op::store: {
             const auto index = read_u16(bytecode.code, ip);
-            const auto value = pop();
-            if (index >= frames.back().locals.size()) {
-                throw std::runtime_error(
-                    xorstr_("Concept VM local store is out of range"));
+            if (reordered) {
+                if (index >= frames.back().locals.size()) {
+                    throw std::runtime_error(
+                        xorstr_("Concept VM local store is out of range"));
+                }
+                frames.back().locals[index] = pop();
+            } else {
+                const auto value = pop();
+                if (index >= frames.back().locals.size()) {
+                    throw std::runtime_error(
+                        xorstr_("Concept VM local store is out of range"));
+                }
+                frames.back().locals[index] = value;
             }
-            frames.back().locals[index] = value;
             break;
         }
         case Op::new_object: {
@@ -1428,8 +1583,8 @@ std::int64_t execute(const Bytecode& bytecode) {
         }
         case Op::store_field: {
             const auto index = read_u16(bytecode.code, ip);
-            const auto value = pop();
-            auto& fields = object_fields(pop());
+            const auto [object, value] = pop_binary(reordered);
+            auto& fields = object_fields(object);
             if (index >= fields.size()) {
                 throw std::runtime_error(xorstr_(
                     "Concept VM class field store is out of range"));
@@ -1540,8 +1695,8 @@ std::int64_t execute(const Bytecode& bytecode) {
         }
         case Op::pointer_offset: {
             const auto type = read_type(bytecode.code, ip);
-            const auto offset = std::bit_cast<std::int64_t>(pop());
-            const auto handle = pop();
+            const auto [handle, offset_bits] = pop_binary(reordered);
+            const auto offset = std::bit_cast<std::int64_t>(offset_bits);
             const auto target = pointer_target(handle);
             if (target.kind == PointerTarget::Kind::local ||
                 target.kind == PointerTarget::Kind::field) {
@@ -1602,8 +1757,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             stack.push_back(load_pointer(pop()));
             break;
         case Op::store_indirect: {
-            const auto value = pop();
-            const auto pointer = pop();
+            const auto [pointer, value] = pop_binary(reordered);
             store_pointer(pointer, value);
             break;
         }
@@ -1622,19 +1776,27 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::divide:
         case Op::modulo: {
             const auto type = read_type(bytecode.code, ip);
-            const auto right = pop();
-            const auto left = pop();
-            stack.push_back(arithmetic(op, type, left, right));
+            const auto [left, right] = pop_binary(reordered);
+            stack.push_back(
+                arithmetic(op, type, left, right, substituted));
             break;
         }
         case Op::negate: {
             const auto type = read_type(bytecode.code, ip);
-            stack.push_back(negate_value(type, pop()));
+            const auto value = pop();
+            stack.push_back(substituted && !is_floating(type)
+                                ? normalize_integral(
+                                      type,
+                                      handler_value_barrier(~value) + 1)
+                                : negate_value(type, value));
             break;
         }
         case Op::logical_not: {
             const auto type = read_type(bytecode.code, ip);
-            stack.push_back(truthy(type, pop()) ? 0 : 1);
+            const auto value = truthy(type, pop());
+            stack.push_back(substituted
+                                ? static_cast<std::uint64_t>(!value)
+                                : (value ? 0 : 1));
             break;
         }
         case Op::equal:
@@ -1644,18 +1806,23 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::greater:
         case Op::greater_equal: {
             const auto type = read_type(bytecode.code, ip);
-            const auto right = pop();
-            const auto left = pop();
+            const auto [left, right] = pop_binary(reordered);
             if (type == ValueType::text) {
                 if (op != Op::equal && op != Op::not_equal) {
                     throw std::runtime_error(xorstr_(
                         "Concept VM string ordering is not supported"));
                 }
-                const bool equal = text_value(text_heap, left) ==
-                                   text_value(text_heap, right);
+                const bool equal = substituted
+                                       ? text_value(text_heap, right) ==
+                                             text_value(text_heap, left)
+                                       : text_value(text_heap, left) ==
+                                             text_value(text_heap, right);
                 stack.push_back((op == Op::equal ? equal : !equal) ? 1 : 0);
             } else {
-                stack.push_back(compare_values(op, type, left, right) ? 1 : 0);
+                stack.push_back(compare_values(op, type, left, right,
+                                               substituted)
+                                    ? 1
+                                    : 0);
             }
             break;
         }
@@ -1663,8 +1830,17 @@ std::int64_t execute(const Bytecode& bytecode) {
             ip = read_u32(bytecode.code, ip);
             break;
         case Op::jump_if_false: {
-            const auto target = read_u32(bytecode.code, ip);
-            if (pop() == 0) {
+            std::uint32_t target{};
+            std::uint64_t condition{};
+            if (reordered) {
+                condition = pop();
+                target = read_u32(bytecode.code, ip);
+            } else {
+                target = read_u32(bytecode.code, ip);
+                condition = pop();
+            }
+            const bool should_jump = substituted ? !condition : condition == 0;
+            if (should_jump) {
                 ip = target;
             }
             break;
@@ -1682,9 +1858,8 @@ std::int64_t execute(const Bytecode& bytecode) {
                     "Concept VM call has more arguments than locals"));
             }
             std::vector<std::uint64_t> function_locals(local_count, 0);
-            for (std::size_t index = argument_count; index != 0; --index) {
-                function_locals[index - 1] = pop();
-            }
+            transfer_arguments(function_locals, 0, argument_count,
+                               reordered);
             frames.push_back({next_frame_id++, ip, stack.size(),
                               std::move(function_locals)});
             ip = target;
@@ -1704,9 +1879,8 @@ std::int64_t execute(const Bytecode& bytecode) {
                     xorstr_("Concept VM method call local layout is invalid"));
             }
             std::vector<std::uint64_t> method_locals(local_count, 0);
-            for (std::size_t index = argument_count; index != 0; --index) {
-                method_locals[index] = pop();
-            }
+            transfer_arguments(method_locals, 1, argument_count,
+                               reordered);
             const auto receiver = pop();
             method_locals[0] = receiver;
             frames.push_back({next_frame_id++, ip, stack.size(),

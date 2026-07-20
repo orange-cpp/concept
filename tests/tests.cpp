@@ -110,6 +110,49 @@ void randomized_opcode_test() {
            "custom VM counts should preserve shared execution state");
 }
 
+void handler_mutation_test() {
+    constexpr std::string_view source = R"(
+        fn combine(i64 first, i64 second, i64 adjustment) -> i64 {
+            i64 value = first + second;
+            value = value - adjustment;
+            value = value * 3;
+            value = value / 3;
+            value = value % 100;
+            i64* pointer = &value;
+            *pointer = *pointer + 0;
+            if (!(value >= 42)) { return 0; }
+            if (value <= 42) {
+                if (value == 42) { return value; }
+            }
+            return 0;
+        }
+
+        fn main() -> i64 {
+            string left = "handler";
+            string right = "handler";
+            if (left != right) { return 0; }
+            return combine(20, 30, 8);
+        }
+    )";
+
+    auto compiled = cpt::compile(source, "handler-mutation.concept", 1);
+    bool equivalent = true;
+    for (std::uint64_t seed = 0; seed < 64; ++seed) {
+        compiled.vm_seeds.assign(
+            1, seed * 0x9e3779b97f4a7c15ULL +
+                   0xd1b54a32d192ed03ULL);
+        const auto loaded =
+            cpt::deserialize(cpt::serialize(compiled));
+        if (cpt::execute(loaded) != 42) {
+            equivalent = false;
+            break;
+        }
+    }
+    expect(equivalent,
+           "reordered, substituted, and junk-mutated handlers should remain "
+           "semantically equivalent");
+}
+
 void complexity_decorator_test() {
     constexpr std::string_view plain_source = R"(
         fn main() -> i32 {
@@ -1122,6 +1165,7 @@ int main() {
         execution_test();
         forward_call_test();
         randomized_opcode_test();
+        handler_mutation_test();
         complexity_decorator_test();
         class_test();
         pointer_test();
