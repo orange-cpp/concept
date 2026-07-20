@@ -163,6 +163,36 @@ void encoded_bytecode_test() {
            "rolling-key decoded operands should execute unchanged");
 }
 
+void bytecode_direction_test() {
+    auto compiled = cpt::compile(R"(
+        fn adjust(i64 value) -> i64 { return value + 2; }
+        fn main() -> i64 {
+            i64 value = adjust(40);
+            if (value == 42) { return value; }
+            return 0;
+        }
+    )", "bytecode-direction.concept", 1);
+
+    compiled.vm_seeds.assign(1, 0x123456789abcdef0ULL);
+    const auto forward_image = cpt::serialize(compiled);
+    const auto forward = cpt::deserialize(forward_image);
+
+    compiled.vm_seeds.assign(1, 0x923456789abcdef0ULL);
+    const auto reversed_image = cpt::serialize(compiled);
+    const auto reversed = cpt::deserialize(reversed_image);
+
+    expect(!forward.vm_regions.empty() && !reversed.vm_regions.empty() &&
+               (forward.vm_regions[0].opcode_seed >> 63) == 0 &&
+               (reversed.vm_regions[0].opcode_seed >> 63) == 1,
+           "VM seed direction bit should select forward and reversed regions");
+    expect(forward_image != reversed_image,
+           "opposite bytecode directions should produce different images");
+    expect(forward.code == compiled.code && reversed.code == compiled.code,
+           "both bytecode directions should restore canonical code");
+    expect(cpt::execute(forward) == 42 && cpt::execute(reversed) == 42,
+           "forward and reversed bytecode regions should execute equally");
+}
+
 void handler_mutation_test() {
     constexpr std::string_view source = R"(
         fn combine(i64 first, i64 second, i64 adjustment) -> i64 {
@@ -1219,6 +1249,7 @@ int main() {
         forward_call_test();
         randomized_opcode_test();
         encoded_bytecode_test();
+        bytecode_direction_test();
         handler_mutation_test();
         complexity_decorator_test();
         class_test();

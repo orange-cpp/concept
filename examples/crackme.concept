@@ -1,0 +1,144 @@
+// Build this challenge with `--vms 64` so every available VM mutation layer is
+// used. The six answer blocks are intentionally not stored as plaintext.
+
+@complexity(100)
+fn fold_alpha(i64 state, i64 block, i64 salt) -> i64 {
+    i64 lane = (block * 97 + salt * 193 + 17) % 1000003;
+    state = (state * 48271 + lane * 69621 + salt * 104729 + 1237) %
+        2147483629;
+    state = (state * 40699 + lane * lane + block * 257 + 97) %
+        2147483629;
+    return state;
+}
+
+@complexity(100)
+fn fold_beta(i64 state, i64 block, i64 salt) -> i64 {
+    i64 lane = (block * block + salt * 8191 + 31337) % 1000003;
+    state = (state * 65537 + lane * 31337 + block * salt + 97) %
+        2147483587;
+    state = (state * 32771 + lane * lane + salt * 99991 + block) %
+        2147483587;
+    return state;
+}
+
+@complexity(100)
+fn valid_block(i64 block) -> bool {
+    if (block < 0) {
+        return false;
+    }
+    if (block > 9999) {
+        return false;
+    }
+    return true;
+}
+
+class LockState {
+    i64 alpha;
+    i64 beta;
+    i64 gamma;
+    i64 step;
+
+    constructor() {
+        this.alpha = 130912042;
+        this.beta = 198491317;
+        this.gamma = 93485723;
+        this.step = 0;
+    }
+
+    @complexity(100)
+    fn absorb(i64 block, i64 salt) -> i64 {
+        this.alpha = fold_alpha(this.alpha, block, salt);
+
+        i64 coupled = (block + this.alpha % 1009) % 1000003;
+        this.beta = fold_beta(
+            this.beta, coupled, salt + this.step);
+
+        this.gamma = (
+            this.gamma * 65539 +
+            (block + 1) * (salt + 37) +
+            (this.alpha % 8191) * (this.beta % 4093) +
+            this.step * 31337) % 2147483563;
+        this.step = this.step + 1;
+
+        return (this.alpha + this.beta + this.gamma) % 1000003;
+    }
+
+    @complexity(100)
+    fn accepted() -> bool {
+        i64 failures = 0;
+        if (this.step != 6) {
+            failures = failures + 1;
+        }
+        if (this.alpha != 841408186) {
+            failures = failures + 1;
+        }
+        if (this.beta != 891516885) {
+            failures = failures + 1;
+        }
+        if (this.gamma != 156176884) {
+            failures = failures + 1;
+        }
+        return failures == 0;
+    }
+}
+
+@complexity(100)
+fn main() -> int {
+    println("=== Concept VM crackme ===");
+    println("Enter six decimal blocks from 0 to 9999.");
+
+    i64 blocks[6];
+    i64 salts[6];
+    salts[0] = 11;
+    salts[1] = 23;
+    salts[2] = 37;
+    salts[3] = 53;
+    salts[4] = 71;
+    salts[5] = 97;
+
+    print("Block 1: ");
+    blocks[0] = input_i64();
+    print("Block 2: ");
+    blocks[1] = input_i64();
+    print("Block 3: ");
+    blocks[2] = input_i64();
+    print("Block 4: ");
+    blocks[3] = input_i64();
+    print("Block 5: ");
+    blocks[4] = input_i64();
+    print("Block 6: ");
+    blocks[5] = input_i64();
+
+    i64 index = 0;
+    i64 invalid = 0;
+    while (index < 6) {
+        if (!valid_block(blocks[index])) {
+            invalid = invalid + 1;
+        }
+        index = index + 1;
+    }
+
+    LockState lock = LockState();
+    index = 0;
+    i64 evidence = 0;
+    while (index < 6) {
+        evidence = evidence + lock.absorb(blocks[index], salts[index]);
+        index = index + 1;
+    }
+
+    if (invalid != 0) {
+        println("Access denied.");
+        return 1;
+    }
+    if (!lock.accepted()) {
+        println("Access denied.");
+        return 1;
+    }
+    if (evidence == -1) {
+        println("Access denied.");
+        return 1;
+    }
+
+    println("Access granted. You solved the Concept VM crackme.");
+    return 0;
+}

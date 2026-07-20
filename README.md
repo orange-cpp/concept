@@ -233,52 +233,127 @@ and modulo by zero are runtime errors; floating-point operations use IEEE
 behavior. Floating-to-integral casts reject non-finite and out-of-range values
 at runtime.
 
-## Architecture
+## Virtual machine features
 
-The compiler performs this pipeline:
+Concept uses a versioned stack VM. The native VM is copied into every generated
+program, while that program's bytecode image is appended to the copy:
 
 ```text
 source -> lexer/parser -> bytecode compiler -> bytecode image
        -> copy native VM stub -> append image and trailer -> program.exe/.dll
 ```
 
-The runtime reads the trailer from its own executable, verifies and deserializes
-the bytecode, and executes it on a stack VM. The bytecode image is versioned so
-the instruction set can evolve deliberately.
+At startup the VM finds the trailer in its own file, reads and deserializes the
+embedded image, validates it, and begins at the recorded entry point. The
+bytecode version is checked explicitly; an incompatible image is rejected
+instead of being interpreted with the wrong instruction format.
 
-Every compiler invocation divides code into instruction-aligned VM regions.
-Each region receives a separate opcode-layout seed that shuffles instruction
-bytes to unique values across the full `0..255` range. It then transforms every
-opcode and operand byte with a per-region rolling key derived from the image key,
-nonce, region boundaries, and VM seed. Each ciphertext byte feeds the next key
-state, and a checksum rejects damaged encoded code before decoding. The runtime
-reverses the rolling transform, reconstructs each inverse opcode mapping,
-validates the regions, and cooperatively switches the active VM context as
-control flow crosses region boundaries. Contexts own their code regions while
-sharing the operand stack, call frames, locals, and string heap. Compiling
-identical source twice therefore produces different encoded bytecode. The key
-material must remain recoverable from the executable, so this is an obfuscation
-boundary rather than secret-key encryption.
+### Execution model
 
-The same per-VM seeds also select handler mutations independently for every
-opcode. Four precompiled handler shapes vary operand extraction and argument
-transfer order, substitute equivalent integral arithmetic and mirrored
-comparisons, and execute different side-effect-free junk calculations. Thus two
-compilations can follow different native handler paths even when their Concept
-behavior is identical. All handler shapes remain present in the packaged native
-runtime, so this raises analysis cost but is not native machine-code mutation or
-a security boundary.
+- The operand stack stores 64-bit slots. Narrow integers, `bool`, `f32`, and
+  `f64` retain their declared semantics through typed instructions and value
+  normalization. Strings, class objects, and pointers are represented by VM
+  handles rather than copied C++ objects.
+- Function, method, and constructor calls use frames containing the return
+  address, stack base, and local slots. Arguments are transferred into the new
+  frame in source order, recursion is supported, and the call depth is limited
+  to 4096 frames.
+- The instruction set covers constants, locals, typed casts, integer and
+  floating-point arithmetic, comparisons, conditional and unconditional
+  branches, functions, class construction and fields, arrays, pointers, heap
+  memory, text input/output, native calls, TCP sockets, and typed returns.
+- Branch, call, and entry targets are absolute bytecode offsets. The validator
+  requires every target and VM-region boundary to start on an instruction.
+  Unknown opcodes, truncated operands, invalid value types, invalid string
+  indexes, malformed regions, and trailing serialized data are rejected before
+  execution.
+- Runtime checks report stack underflow, call-stack overflow, division by zero,
+  invalid numeric conversions, null or stale handles, pointer bounds errors, and
+  invalid or repeated `free()` operations instead of silently continuing with a
+  corrupted VM state.
 
-Complexity decorators are also an obfuscation boundary rather than a security
-guarantee. They increase reverse-engineering cost and executable size, but a
-determined analyst can still recover program behavior.
+### Multiple VM contexts
 
-Native VM, bytecode-loader, payload-reader, and runtime diagnostic strings use
-`xorstr_()` so their plaintext is not stored directly in generated executables.
-They are decrypted when used and can still be observed in live process memory;
-this is an obfuscation boundary, not secret-key encryption. Concept source
-string constants continue to use the separate per-compilation ChaCha20 bytecode
-path described above.
+`--vms <count>` requests between 1 and 64 VM contexts. The compiler divides the
+instruction stream at instruction boundaries, with one code region and one
+mutation seed per context. If a small program has fewer instructions than the
+requested count, only the number of non-empty regions that can be formed is
+used.
+
+The contexts execute cooperatively in one native thread. Before each
+instruction, the dispatcher selects the context that owns the current
+instruction pointer, so a branch or call into another region continues under
+that region's opcode layout and handler mutations. These are VM contexts, not
+parallel OS threads. They deliberately share the operand stack, call frames and
+locals, string and object heaps, pointer table, and allocated heap blocks, so
+state written in one context is immediately visible after a context switch.
+
+### Per-compilation bytecode mutation
+
+| Feature | VM behavior | Boundary |
+| --- | --- | --- |
+| Random opcode numbers | Every region seed builds a different one-to-one mapping from canonical instructions to byte values selected from the full `0..255` range. The runtime reconstructs the inverse mapping before dispatch. | The mapping and seed are recoverable from the image and runtime. |
+| Random region direction | A seed bit selects whether the complete physical opcode-and-operand byte sequence for that region is stored forward or reversed. The runtime restores the direction before decoding opcodes. | This changes storage layout, not Concept control-flow semantics. |
+| Rolling bytecode encoding | After opcode mapping and direction selection, every opcode and operand byte is transformed with a per-region rolling state derived from the image key, nonce, region boundaries, and VM seed. Each ciphertext byte feeds the next state. | Required decoding material ships with the executable. |
+| Encoded-code checksum | The loader verifies the stored encoded stream before attempting to decode it. | This detects accidental damage or simple tampering; it is not authentication against an attacker who can rewrite the executable. |
+| Handler mutation | Every VM seed and opcode select one of four precompiled native handler shapes. The shapes reorder safe operand extraction or argument transfer, use equivalent integral arithmetic and mirrored comparisons, and perform different side-effect-free junk calculations. | All shapes remain in the native VM; this is runtime path variation, not generated native machine-code mutation. |
+| `@complexity(n)` | The compiler can add opaque predicates, junk instructions, decoy paths, trampoline jumps, and fragmented control flow, scaled from straight bytecode at `0` to the strongest available transformation at `100`. | It increases bytecode size and analysis cost without changing program results or creating a security boundary. |
+
+Because region seeds, image keys, and nonces are freshly generated, compiling
+identical source twice normally produces a different bytecode image and can
+select different native handler paths. Decoding must still be possible inside
+the process, so these features are obfuscation layers, not secret-key encryption
+or a guarantee that program behavior cannot be recovered.
+
+### Runtime data and memory
+
+- Source string constants are stored in the image with per-compilation ChaCha20
+  encryption and are decrypted while the image is loaded. Runtime-created text
+  is held in a shared VM string heap.
+- Class instances live in a shared object heap. Field instructions address
+  their slots, and constructors and methods use the same call-frame mechanism as
+  ordinary functions.
+- Fixed arrays use zero-initialized, frame-owned VM blocks. Dynamic arrays and
+  `malloc<T>()` use checked shared heap blocks. Array indexing and pointer
+  arithmetic preserve the element type and validate bounds.
+- `&`, `*`, array decay, field pointers, pointer-to-pointer values, and
+  `void*` conversions use tracked pointer records. Pointers to expired local
+  variables or arrays are rejected. `free()` accepts only the base pointer of a
+  live `malloc()` allocation.
+- `ptr_cast<T>(address)` creates a native process-memory pointer. Native reads
+  and writes are guarded on Windows and fail with a runtime error when the range
+  is inaccessible. Native `string*` values and dereferencing `void*` are not
+  allowed.
+
+### I/O, native integration, and packaging
+
+- `input_text()`, integral input, and floating-point input read from standard
+  input. `print()` and `println()` format supported core values to standard
+  output.
+- Socket instructions implement the `std::Socket` API described below. On
+  Windows, Winsock is loaded and its functions are resolved only when a socket
+  instruction actually executes, so programs that do not use sockets do not
+  load `WS2_32.dll`.
+- The generic Windows x64 native-call bridge resolves a requested module and
+  symbol at runtime and supports up to four integral, Boolean, string, or
+  non-string pointer arguments. `std::win_api` supplies Concept-language
+  wrappers over this bridge; the VM does not need a separate opcode for every
+  WinAPI function.
+- An executable runs Concept `main` and converts its declared return value to a
+  process exit code. A Windows `--shared-module` build exports a native
+  `DllMain`, starts a worker thread on process attach, and runs Concept
+  `dll_main` outside the loader lock.
+- MSVC runtime stubs use the static CRT. Native VM, bytecode-loader,
+  payload-reader, and diagnostic strings use `xorstr_()` so their plaintext is
+  not stored directly in the generated file. The text is decoded when used and
+  can still be observed in live process memory.
+
+The compiler and core VM remain portable C++23 code. Platform-specific modules
+are gated: `std::win_api` and shared-module output are rejected on non-Windows
+hosts, the current generic native-call bridge requires Windows x64, and guarded
+native pointer dereferencing is currently implemented for Windows. A remaining
+unsupported runtime operation fails explicitly instead of silently using
+different behavior.
 
 ## Standard TCP sockets
 

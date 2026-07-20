@@ -18,7 +18,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 15;
+constexpr std::uint32_t bytecode_version = 16;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -256,6 +256,22 @@ std::vector<std::uint8_t> decode_opcodes(
     return decoded;
 }
 
+bool region_is_reversed(const Bytecode::VmRegion& region) noexcept {
+    return (region.opcode_seed & (std::uint64_t{1} << 63)) != 0;
+}
+
+void apply_region_directions(
+    std::vector<std::uint8_t>& code,
+    const std::vector<Bytecode::VmRegion>& regions) {
+    for (const auto& region : regions) {
+        if (region_is_reversed(region)) {
+            std::reverse(
+                code.begin() + static_cast<std::ptrdiff_t>(region.begin),
+                code.begin() + static_cast<std::ptrdiff_t>(region.end));
+        }
+    }
+}
+
 std::uint32_t load_word(const std::uint8_t* bytes) {
     return static_cast<std::uint32_t>(bytes[0]) |
            (static_cast<std::uint32_t>(bytes[1]) << 8) |
@@ -430,6 +446,7 @@ std::vector<std::uint8_t> serialize(const Bytecode& bytecode) {
             xorstr_("too many VM regions in Concept bytecode"));
     }
     auto encoded_code = encode_opcodes(bytecode.code, regions);
+    apply_region_directions(encoded_code, regions);
     transform_code(encoded_code, regions, bytecode.string_key,
                    bytecode.string_nonce, true);
     const auto encoded_code_checksum = code_checksum(encoded_code);
@@ -537,6 +554,7 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
     }
     transform_code(encoded_code, bytecode.vm_regions,
                    bytecode.string_key, bytecode.string_nonce, false);
+    apply_region_directions(encoded_code, bytecode.vm_regions);
     bytecode.code = decode_opcodes(encoded_code, bytecode.vm_regions);
     cursor += code_size;
     if (string_count > (bytes.size() - cursor) / 4) {
