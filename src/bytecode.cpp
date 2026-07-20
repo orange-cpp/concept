@@ -1,5 +1,7 @@
 #include "concept/bytecode.hpp"
 
+#include <xorstr.hpp>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -35,7 +37,7 @@ void append_u64(std::vector<std::uint8_t>& output, const std::uint64_t value) {
 std::uint32_t read_u32(const std::span<const std::uint8_t> bytes,
                        const std::size_t offset) {
     if (offset + 4 > bytes.size()) {
-        throw std::runtime_error("truncated Concept bytecode");
+        throw std::runtime_error(xorstr_("truncated Concept bytecode"));
     }
 
     std::uint32_t value = 0;
@@ -48,7 +50,7 @@ std::uint32_t read_u32(const std::span<const std::uint8_t> bytes,
 std::uint64_t read_u64(const std::span<const std::uint8_t> bytes,
                        const std::size_t offset) {
     if (offset + 8 > bytes.size()) {
-        throw std::runtime_error("truncated Concept bytecode");
+        throw std::runtime_error(xorstr_("truncated Concept bytecode"));
     }
 
     std::uint64_t value = 0;
@@ -115,7 +117,8 @@ std::size_t operand_size(const Op op) {
     case Op::return_value:
         return 0;
     }
-    throw std::runtime_error("unknown Concept bytecode instruction");
+    throw std::runtime_error(
+        xorstr_("unknown Concept bytecode instruction"));
 }
 
 std::uint64_t next_random(std::uint64_t& state) {
@@ -155,11 +158,13 @@ make_vm_regions(const std::vector<std::uint8_t>& canonical_code,
         instruction_starts.push_back(static_cast<std::uint32_t>(offset));
         const auto raw_op = canonical_code[offset];
         if (raw_op > static_cast<std::uint8_t>(Op::return_value)) {
-            throw std::runtime_error("unknown Concept bytecode instruction");
+            throw std::runtime_error(
+                xorstr_("unknown Concept bytecode instruction"));
         }
         offset += 1 + operand_size(static_cast<Op>(raw_op));
         if (offset > canonical_code.size()) {
-            throw std::runtime_error("truncated Concept bytecode instruction");
+            throw std::runtime_error(
+                xorstr_("truncated Concept bytecode instruction"));
         }
     }
 
@@ -194,13 +199,15 @@ std::vector<std::uint8_t> encode_opcodes(
         while (offset < region.end) {
             const auto raw_op = canonical_code[offset];
             if (raw_op >= mapping.size()) {
-                throw std::runtime_error("unknown Concept bytecode instruction");
+                throw std::runtime_error(
+                    xorstr_("unknown Concept bytecode instruction"));
             }
             encoded[offset] = mapping[raw_op];
             offset += 1 + operand_size(static_cast<Op>(raw_op));
         }
         if (offset != region.end) {
-            throw std::runtime_error("VM region splits a bytecode instruction");
+            throw std::runtime_error(
+                xorstr_("VM region splits a bytecode instruction"));
         }
     }
     return encoded;
@@ -223,19 +230,20 @@ std::vector<std::uint8_t> decode_opcodes(
         while (offset < region.end) {
             const auto canonical = inverse[decoded[offset]];
             if (canonical == invalid_opcode) {
-                throw std::runtime_error(
-                    "opcode does not belong to its Concept VM context");
+                throw std::runtime_error(xorstr_(
+                    "opcode does not belong to its Concept VM context"));
             }
             decoded[offset] = canonical;
             const auto size = operand_size(static_cast<Op>(canonical));
             if (size > region.end - offset - 1) {
-                throw std::runtime_error(
-                    "VM region splits a bytecode instruction");
+                throw std::runtime_error(xorstr_(
+                    "VM region splits a bytecode instruction"));
             }
             offset += 1 + size;
         }
         if (offset != region.end) {
-            throw std::runtime_error("invalid Concept VM region boundary");
+            throw std::runtime_error(
+                xorstr_("invalid Concept VM region boundary"));
         }
     }
     return decoded;
@@ -338,23 +346,26 @@ void crypt_string_at_index(
 std::vector<std::uint8_t> serialize(const Bytecode& bytecode) {
     validate(bytecode);
     if (bytecode.code.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::runtime_error("Concept bytecode is too large");
+        throw std::runtime_error(xorstr_("Concept bytecode is too large"));
     }
     if (bytecode.strings.size() >
         std::numeric_limits<std::uint32_t>::max()) {
-        throw std::runtime_error("too many strings in Concept bytecode");
+        throw std::runtime_error(
+            xorstr_("too many strings in Concept bytecode"));
     }
     std::size_t string_bytes = 0;
     for (const auto& value : bytecode.strings) {
         if (value.size() > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::runtime_error("Concept string constant is too large");
+            throw std::runtime_error(
+                xorstr_("Concept string constant is too large"));
         }
         string_bytes += 4 + value.size();
     }
 
     const auto regions = make_vm_regions(bytecode.code, bytecode.vm_seeds);
     if (regions.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::runtime_error("too many VM regions in Concept bytecode");
+        throw std::runtime_error(
+            xorstr_("too many VM regions in Concept bytecode"));
     }
     const auto encoded_code = encode_opcodes(bytecode.code, regions);
 
@@ -398,13 +409,14 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
     constexpr std::size_t region_size = 16;
     if (bytes.size() < header_size ||
         !std::equal(bytecode_magic.begin(), bytecode_magic.end(), bytes.begin())) {
-        throw std::runtime_error("not a Concept bytecode image");
+        throw std::runtime_error(xorstr_("not a Concept bytecode image"));
     }
 
     const auto version = read_u32(bytes, 8);
     if (version != bytecode_version) {
-        throw std::runtime_error("unsupported Concept bytecode version " +
-                                 std::to_string(version));
+        throw std::runtime_error(
+            std::string(xorstr_("unsupported Concept bytecode version ")) +
+            std::to_string(version));
     }
 
     Bytecode bytecode;
@@ -412,7 +424,8 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
     bytecode.entry_locals = read_u32(bytes, 16);
     const auto raw_entry_type = read_u32(bytes, 20);
     if (raw_entry_type > static_cast<std::uint32_t>(ValueType::text)) {
-        throw std::runtime_error("invalid Concept entry-point type");
+        throw std::runtime_error(
+            xorstr_("invalid Concept entry-point type"));
     }
     bytecode.entry_type = static_cast<ValueType>(raw_entry_type);
     const auto code_size = read_u32(bytes, 24);
@@ -425,7 +438,8 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
 
     std::size_t cursor = header_size;
     if (vm_count == 0 || vm_count > (bytes.size() - cursor) / region_size) {
-        throw std::runtime_error("invalid Concept VM region table");
+        throw std::runtime_error(
+            xorstr_("invalid Concept VM region table"));
     }
     bytecode.vm_regions.reserve(vm_count);
     bytecode.vm_seeds.reserve(vm_count);
@@ -436,27 +450,31 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
         const auto seed = read_u64(bytes, cursor + 8);
         cursor += region_size;
         if (begin != previous_end || end <= begin || end > code_size) {
-            throw std::runtime_error("invalid Concept VM region boundary");
+            throw std::runtime_error(
+                xorstr_("invalid Concept VM region boundary"));
         }
         bytecode.vm_regions.push_back({begin, end, seed});
         bytecode.vm_seeds.push_back(seed);
         previous_end = end;
     }
     if (previous_end != code_size || code_size > bytes.size() - cursor) {
-        throw std::runtime_error("invalid Concept bytecode image size");
+        throw std::runtime_error(
+            xorstr_("invalid Concept bytecode image size"));
     }
     bytecode.code = decode_opcodes(bytes.subspan(cursor, code_size),
                                    bytecode.vm_regions);
     cursor += code_size;
     if (string_count > (bytes.size() - cursor) / 4) {
-        throw std::runtime_error("invalid Concept string table size");
+        throw std::runtime_error(
+            xorstr_("invalid Concept string table size"));
     }
     bytecode.strings.reserve(string_count);
     for (std::uint32_t index = 0; index < string_count; ++index) {
         const auto length = read_u32(bytes, cursor);
         cursor += 4;
         if (length > bytes.size() - cursor) {
-            throw std::runtime_error("truncated Concept string constant");
+            throw std::runtime_error(
+                xorstr_("truncated Concept string constant"));
         }
         std::vector<std::uint8_t> decrypted(
             bytes.begin() + cursor, bytes.begin() + cursor + length);
@@ -466,7 +484,8 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
         cursor += length;
     }
     if (cursor != bytes.size()) {
-        throw std::runtime_error("trailing data in Concept bytecode image");
+        throw std::runtime_error(
+            xorstr_("trailing data in Concept bytecode image"));
     }
     validate(bytecode);
     return bytecode;
@@ -474,11 +493,13 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
 
 void validate(const Bytecode& bytecode) {
     if (bytecode.code.empty()) {
-        throw std::runtime_error("Concept bytecode contains no instructions");
+        throw std::runtime_error(
+            xorstr_("Concept bytecode contains no instructions"));
     }
     if (static_cast<std::uint8_t>(bytecode.entry_type) >
         static_cast<std::uint8_t>(ValueType::text)) {
-        throw std::runtime_error("invalid Concept entry-point type");
+        throw std::runtime_error(
+            xorstr_("invalid Concept entry-point type"));
     }
 
     std::vector<bool> instruction_starts(bytecode.code.size(), false);
@@ -488,19 +509,22 @@ void validate(const Bytecode& bytecode) {
         instruction_starts[offset] = true;
         const auto raw_op = bytecode.code[offset++];
         if (raw_op > static_cast<std::uint8_t>(Op::return_value)) {
-            throw std::runtime_error("unknown Concept bytecode instruction");
+            throw std::runtime_error(
+                xorstr_("unknown Concept bytecode instruction"));
         }
 
         const auto op = static_cast<Op>(raw_op);
         const auto size = operand_size(op);
         if (size > bytecode.code.size() - offset) {
-            throw std::runtime_error("truncated Concept bytecode instruction");
+            throw std::runtime_error(
+                xorstr_("truncated Concept bytecode instruction"));
         }
 
         const auto check_type = [&](const std::size_t type_offset) {
             if (bytecode.code[type_offset] >
                 static_cast<std::uint8_t>(ValueType::text)) {
-                throw std::runtime_error("invalid value type in Concept bytecode");
+                throw std::runtime_error(
+                    xorstr_("invalid value type in Concept bytecode"));
             }
             return static_cast<ValueType>(bytecode.code[type_offset]);
         };
@@ -512,7 +536,7 @@ void validate(const Bytecode& bytecode) {
             const auto type = check_type(offset);
             if (op == Op::native_pointer && type == ValueType::text) {
                 throw std::runtime_error(
-                    "native string pointer in Concept bytecode");
+                    xorstr_("native string pointer in Concept bytecode"));
             }
             if ((op == Op::add || op == Op::subtract ||
                  op == Op::multiply || op == Op::divide ||
@@ -520,20 +544,20 @@ void validate(const Bytecode& bytecode) {
                  op == Op::less_equal || op == Op::greater ||
                  op == Op::greater_equal) &&
                 !is_numeric(type)) {
-                throw std::runtime_error(
-                    "non-numeric instruction type in Concept bytecode");
+                throw std::runtime_error(xorstr_(
+                    "non-numeric instruction type in Concept bytecode"));
             }
             if (op == Op::modulo && !is_integral(type)) {
-                throw std::runtime_error(
-                    "non-integral modulo type in Concept bytecode");
+                throw std::runtime_error(xorstr_(
+                    "non-integral modulo type in Concept bytecode"));
             }
         }
 
         if (op == Op::push_text) {
             const auto string_index = read_u32(bytecode.code, offset);
             if (string_index >= bytecode.strings.size()) {
-                throw std::runtime_error(
-                    "invalid string constant in Concept bytecode");
+                throw std::runtime_error(xorstr_(
+                    "invalid string constant in Concept bytecode"));
             }
         }
 
@@ -552,26 +576,29 @@ void validate(const Bytecode& bytecode) {
                 !instruction_starts[region.begin] ||
                 (region.end != instruction_starts.size() &&
                  !instruction_starts[region.end])) {
-                throw std::runtime_error("invalid Concept VM region layout");
+                throw std::runtime_error(
+                    xorstr_("invalid Concept VM region layout"));
             }
             previous_end = region.end;
         }
         if (previous_end != instruction_starts.size()) {
-            throw std::runtime_error("Concept VM regions do not cover bytecode");
+            throw std::runtime_error(xorstr_(
+                "Concept VM regions do not cover bytecode"));
         }
     }
 
     const auto check_target = [&](const std::uint32_t target,
                                   const char* description) {
         if (target >= instruction_starts.size() || !instruction_starts[target]) {
-            throw std::runtime_error(std::string("invalid ") + description +
-                                     " in Concept bytecode");
+            throw std::runtime_error(
+                std::string(xorstr_("invalid ")) + description +
+                xorstr_(" in Concept bytecode"));
         }
     };
 
-    check_target(bytecode.entry, "entry point");
+    check_target(bytecode.entry, xorstr_("entry point"));
     for (const auto target : targets) {
-        check_target(target, "branch target");
+        check_target(target, xorstr_("branch target"));
     }
 }
 

@@ -1,5 +1,7 @@
 #include "concept/vm.hpp"
 
+#include <xorstr.hpp>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -83,8 +85,8 @@ public:
             0xd0, 0x97, 0x13, 0x01, 0xa8, 0xea, 0x3b, 0x36, 0xe3, 0xa0};
         module_ = LoadLibraryA(decode_import_name(module_name).c_str());
         if (module_ == nullptr) {
-            throw std::runtime_error(
-                "Concept VM could not load its socket component");
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not load its socket component"));
         }
 
         try {
@@ -118,8 +120,8 @@ private:
         const auto name = decode_import_name(encoded_name);
         const auto address = GetProcAddress(module_, name.c_str());
         if (address == nullptr) {
-            throw std::runtime_error(
-                "Concept VM could not resolve a socket operation");
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not resolve a socket operation"));
         }
         static_assert(sizeof(Function) == sizeof(address));
         return std::bit_cast<Function>(address);
@@ -173,7 +175,8 @@ private:
 
         WSADATA data{};
         if (startup(MAKEWORD(2, 2), &data) != 0) {
-            throw std::runtime_error("Concept VM could not initialize Winsock");
+            throw std::runtime_error(
+                xorstr_("Concept VM could not initialize Winsock"));
         }
         started_ = true;
     }
@@ -190,8 +193,8 @@ public:
             0x65, 0x2a};
         module_ = LoadLibraryA(decode_import_name(module_name).c_str());
         if (module_ == nullptr) {
-            throw std::runtime_error(
-                "Concept VM could not load native-memory support");
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not load native-memory support"));
         }
 
         static constexpr std::array<std::uint8_t, 17> read_name{
@@ -221,8 +224,8 @@ private:
         const auto name = decode_import_name(encoded_name);
         const auto address = GetProcAddress(module_, name.c_str());
         if (address == nullptr) {
-            throw std::runtime_error(
-                "Concept VM could not resolve native-memory support");
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not resolve native-memory support"));
         }
         static_assert(sizeof(Function) == sizeof(address));
         return std::bit_cast<Function>(address);
@@ -365,9 +368,9 @@ std::size_t native_value_size(const ValueType type) {
         return 8;
     case ValueType::text:
         throw std::runtime_error(
-            "Concept VM cannot access native string memory");
+            xorstr_("Concept VM cannot access native string memory"));
     }
-    throw std::logic_error("invalid native pointer value type");
+    throw std::logic_error(xorstr_("invalid native pointer value type"));
 }
 
 bool read_native_value(const std::uint64_t address, const ValueType type,
@@ -466,7 +469,7 @@ bool bind_tcp_socket(const NativeSocket handle, const std::string& host,
         return false;
     }
 
-    const bool any_address = host.empty() || host == "*";
+    const bool any_address = host.empty() || host == xorstr_("*");
     addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -542,7 +545,8 @@ std::string receive_tcp_text(const NativeSocket handle) {
 std::uint16_t read_u16(const std::vector<std::uint8_t>& code,
                        std::size_t& ip) {
     if (ip + 2 > code.size()) {
-        throw std::runtime_error("VM read past the bytecode image");
+        throw std::runtime_error(
+            xorstr_("VM read past the bytecode image"));
     }
     const auto value = static_cast<std::uint16_t>(
         static_cast<std::uint16_t>(code[ip]) |
@@ -554,7 +558,8 @@ std::uint16_t read_u16(const std::vector<std::uint8_t>& code,
 std::uint32_t read_u32(const std::vector<std::uint8_t>& code,
                        std::size_t& ip) {
     if (ip + 4 > code.size()) {
-        throw std::runtime_error("VM read past the bytecode image");
+        throw std::runtime_error(
+            xorstr_("VM read past the bytecode image"));
     }
     std::uint32_t value = 0;
     for (unsigned index = 0; index < 4; ++index) {
@@ -567,7 +572,8 @@ std::uint32_t read_u32(const std::vector<std::uint8_t>& code,
 std::uint64_t read_u64(const std::vector<std::uint8_t>& code,
                        std::size_t& ip) {
     if (ip + 8 > code.size()) {
-        throw std::runtime_error("VM read past the bytecode image");
+        throw std::runtime_error(
+            xorstr_("VM read past the bytecode image"));
     }
     std::uint64_t bits = 0;
     for (unsigned index = 0; index < 8; ++index) {
@@ -580,7 +586,8 @@ std::uint64_t read_u64(const std::vector<std::uint8_t>& code,
 ValueType read_type(const std::vector<std::uint8_t>& code, std::size_t& ip) {
     if (ip >= code.size() ||
         code[ip] > static_cast<std::uint8_t>(ValueType::text)) {
-        throw std::runtime_error("VM encountered an invalid value type");
+        throw std::runtime_error(
+            xorstr_("VM encountered an invalid value type"));
     }
     return static_cast<ValueType>(code[ip++]);
 }
@@ -600,7 +607,8 @@ unsigned integral_width(const ValueType type) {
     case ValueType::u64:
         return 64;
     default:
-        throw std::runtime_error("VM expected an integral value type");
+        throw std::runtime_error(
+            xorstr_("VM expected an integral value type"));
     }
 }
 
@@ -642,7 +650,8 @@ std::uint64_t f64_bits(const double value) {
 
 bool truthy(const ValueType type, const std::uint64_t bits) {
     if (type == ValueType::text) {
-        throw std::runtime_error("string cannot be used as a boolean");
+        throw std::runtime_error(
+            xorstr_("string cannot be used as a boolean"));
     }
     if (type == ValueType::boolean) {
         return bits != 0;
@@ -675,8 +684,8 @@ long double numeric_value(const ValueType type, const std::uint64_t bits) {
 std::uint64_t floating_to_integral(const long double value,
                                    const ValueType target) {
     if (!std::isfinite(value)) {
-        throw std::runtime_error(
-            "cannot convert a non-finite floating value to an integer");
+        throw std::runtime_error(xorstr_(
+            "cannot convert a non-finite floating value to an integer"));
     }
 
     const auto width = integral_width(target);
@@ -684,8 +693,8 @@ std::uint64_t floating_to_integral(const long double value,
     if (is_signed_integral(target)) {
         const auto magnitude = std::ldexp(1.0L, static_cast<int>(width - 1));
         if (truncated < -magnitude || truncated >= magnitude) {
-            throw std::runtime_error(
-                "floating value is outside the target integer range");
+            throw std::runtime_error(xorstr_(
+                "floating value is outside the target integer range"));
         }
         return normalize_integral(
             target, static_cast<std::uint64_t>(
@@ -694,8 +703,8 @@ std::uint64_t floating_to_integral(const long double value,
 
     const auto upper_bound = std::ldexp(1.0L, static_cast<int>(width));
     if (truncated < 0.0L || truncated >= upper_bound) {
-        throw std::runtime_error(
-            "floating value is outside the target integer range");
+        throw std::runtime_error(xorstr_(
+            "floating value is outside the target integer range"));
     }
     return normalize_integral(target,
                               static_cast<std::uint64_t>(truncated));
@@ -705,8 +714,8 @@ std::uint64_t convert_value(const std::uint64_t bits,
                             const ValueType source,
                             const ValueType target) {
     if (source == ValueType::text || target == ValueType::text) {
-        throw std::runtime_error(
-            "string conversion is not supported by the Concept VM");
+        throw std::runtime_error(xorstr_(
+            "string conversion is not supported by the Concept VM"));
     }
     if (target == ValueType::boolean) {
         return truthy(source, bits) ? 1 : 0;
@@ -765,7 +774,8 @@ std::uint64_t floating_arithmetic(const Op op, const ValueType type,
             break;
         }
     }
-    throw std::runtime_error("invalid floating-point VM operation");
+    throw std::runtime_error(
+        xorstr_("invalid floating-point VM operation"));
 }
 
 std::uint64_t integral_arithmetic(const Op op, const ValueType type,
@@ -783,9 +793,10 @@ std::uint64_t integral_arithmetic(const Op op, const ValueType type,
     case Op::divide:
     case Op::modulo:
         if (rhs == 0) {
-            throw std::runtime_error(op == Op::divide
-                                         ? "division by zero in Concept program"
-                                         : "modulo by zero in Concept program");
+        throw std::runtime_error(
+            op == Op::divide
+                ? xorstr_("division by zero in Concept program")
+                : xorstr_("modulo by zero in Concept program"));
         }
         if (!is_signed_integral(type)) {
             return normalize_integral(type, op == Op::divide ? lhs / rhs
@@ -808,7 +819,8 @@ std::uint64_t integral_arithmetic(const Op op, const ValueType type,
                                       static_cast<std::uint64_t>(result));
         }
     default:
-        throw std::runtime_error("invalid integral VM operation");
+        throw std::runtime_error(
+            xorstr_("invalid integral VM operation"));
     }
 }
 
@@ -903,7 +915,8 @@ bool compare_values(const Op op, const ValueType type,
             break;
         }
     }
-    throw std::runtime_error("invalid comparison VM operation");
+    throw std::runtime_error(
+        xorstr_("invalid comparison VM operation"));
 }
 
 std::uint64_t negate_value(const ValueType type, const std::uint64_t bits) {
@@ -919,7 +932,8 @@ std::uint64_t negate_value(const ValueType type, const std::uint64_t bits) {
 const std::string& text_value(const std::vector<std::string>& heap,
                               const std::uint64_t handle) {
     if (handle >= heap.size()) {
-        throw std::runtime_error("Concept VM string handle is invalid");
+        throw std::runtime_error(
+            xorstr_("Concept VM string handle is invalid"));
     }
     return heap[static_cast<std::size_t>(handle)];
 }
@@ -927,7 +941,8 @@ const std::string& text_value(const std::vector<std::string>& heap,
 std::string read_input_line() {
     std::string line;
     if (!std::getline(std::cin, line)) {
-        throw std::runtime_error("failed to read a line from standard input");
+        throw std::runtime_error(
+            xorstr_("failed to read a line from standard input"));
     }
     if (!line.empty() && line.back() == '\r') {
         line.pop_back();
@@ -958,7 +973,8 @@ std::int64_t read_input_i64() {
                                         value);
     if (value_text.empty() || result.ec != std::errc{} ||
         result.ptr != value_text.data() + value_text.size()) {
-        throw std::runtime_error("standard input is not a valid i64 value");
+        throw std::runtime_error(
+            xorstr_("standard input is not a valid i64 value"));
     }
     return value;
 }
@@ -972,7 +988,8 @@ double read_input_f64() {
                                         value);
     if (value_text.empty() || result.ec != std::errc{} ||
         result.ptr != value_text.data() + value_text.size()) {
-        throw std::runtime_error("standard input is not a valid f64 value");
+        throw std::runtime_error(
+            xorstr_("standard input is not a valid f64 value"));
     }
     return value;
 }
@@ -982,7 +999,7 @@ void print_value(const ValueType type, const std::uint64_t bits,
                  const bool newline) {
     switch (type) {
     case ValueType::boolean:
-        std::cout << (bits == 0 ? "false" : "true");
+        std::cout << (bits == 0 ? xorstr_("false") : xorstr_("true"));
         break;
     case ValueType::i8:
     case ValueType::i16:
@@ -1024,8 +1041,8 @@ std::int64_t exit_value(const ValueType type, const std::uint64_t bits) {
         return type == ValueType::u64 ? std::bit_cast<std::int64_t>(value)
                                       : static_cast<std::int64_t>(value);
     }
-    throw std::runtime_error(
-        "Concept entry point returned a non-integral value");
+    throw std::runtime_error(xorstr_(
+        "Concept entry point returned a non-integral value"));
 }
 
 } // namespace
@@ -1081,13 +1098,14 @@ std::int64_t execute(const Bytecode& bytecode) {
                 return vm_contexts[index];
             }
         }
-        throw std::runtime_error(
-            "Concept instruction pointer belongs to no VM context");
+        throw std::runtime_error(xorstr_(
+            "Concept instruction pointer belongs to no VM context"));
     };
 
     const auto pop = [&]() {
         if (stack.empty() || stack.size() <= frames.back().stack_base) {
-            throw std::runtime_error("Concept VM operand stack underflow");
+            throw std::runtime_error(
+                xorstr_("Concept VM operand stack underflow"));
         }
         const auto value = stack.back();
         stack.pop_back();
@@ -1097,8 +1115,8 @@ std::int64_t execute(const Bytecode& bytecode) {
     const auto object_fields = [&](const std::uint64_t handle)
         -> std::vector<std::uint64_t>& {
         if (handle == 0 || handle > object_heap.size()) {
-            throw std::runtime_error(
-                "Concept VM class object handle is invalid");
+            throw std::runtime_error(xorstr_(
+                "Concept VM class object handle is invalid"));
         }
         return object_heap[static_cast<std::size_t>(handle - 1)];
     };
@@ -1107,7 +1125,7 @@ std::int64_t execute(const Bytecode& bytecode) {
         -> const PointerTarget& {
         if (handle == 0 || handle > pointer_heap.size()) {
             throw std::runtime_error(
-                "Concept VM pointer is null or invalid");
+                xorstr_("Concept VM pointer is null or invalid"));
         }
         return pointer_heap[static_cast<std::size_t>(handle - 1)];
     };
@@ -1117,8 +1135,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             frames.rbegin(), frames.rend(),
             [id](const Frame& candidate) { return candidate.id == id; });
         if (frame == frames.rend()) {
-            throw std::runtime_error(
-                "Concept VM pointer refers to an expired local variable");
+            throw std::runtime_error(xorstr_(
+                "Concept VM pointer refers to an expired local variable"));
         }
         return *frame;
     };
@@ -1128,23 +1146,23 @@ std::int64_t execute(const Bytecode& bytecode) {
         if (target.kind == PointerTarget::Kind::local) {
             auto& frame = local_frame(target.owner);
             if (target.index >= frame.locals.size()) {
-                throw std::runtime_error(
-                    "Concept VM pointer local index is out of range");
+                throw std::runtime_error(xorstr_(
+                    "Concept VM pointer local index is out of range"));
             }
             return frame.locals[target.index];
         }
         if (target.kind == PointerTarget::Kind::field) {
             auto& fields = object_fields(target.owner);
             if (target.index >= fields.size()) {
-                throw std::runtime_error(
-                    "Concept VM pointer field index is out of range");
+                throw std::runtime_error(xorstr_(
+                    "Concept VM pointer field index is out of range"));
             }
             return fields[target.index];
         }
         std::uint64_t value = 0;
         if (!read_native_value(target.owner, target.native_type, value)) {
-            throw std::runtime_error(
-                "Concept VM could not read the native pointer address");
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not read the native pointer address"));
         }
         return target.native_type == ValueType::boolean
                    ? (value == 0 ? 0ULL : 1ULL)
@@ -1157,8 +1175,8 @@ std::int64_t execute(const Bytecode& bytecode) {
         if (target.kind == PointerTarget::Kind::local) {
             auto& frame = local_frame(target.owner);
             if (target.index >= frame.locals.size()) {
-                throw std::runtime_error(
-                    "Concept VM pointer local index is out of range");
+                throw std::runtime_error(xorstr_(
+                    "Concept VM pointer local index is out of range"));
             }
             frame.locals[target.index] = value;
             return;
@@ -1166,8 +1184,8 @@ std::int64_t execute(const Bytecode& bytecode) {
         if (target.kind == PointerTarget::Kind::field) {
             auto& fields = object_fields(target.owner);
             if (target.index >= fields.size()) {
-                throw std::runtime_error(
-                    "Concept VM pointer field index is out of range");
+                throw std::runtime_error(xorstr_(
+                    "Concept VM pointer field index is out of range"));
             }
             fields[target.index] = value;
             return;
@@ -1176,8 +1194,8 @@ std::int64_t execute(const Bytecode& bytecode) {
                                 ? (value == 0 ? 0ULL : 1ULL)
                                 : value;
         if (!write_native_value(target.owner, target.native_type, stored)) {
-            throw std::runtime_error(
-                "Concept VM could not write the native pointer address");
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not write the native pointer address"));
         }
     };
 
@@ -1194,8 +1212,8 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::push_text: {
             const auto index = read_u32(bytecode.code, ip);
             if (index >= bytecode.strings.size()) {
-                throw std::runtime_error(
-                    "Concept VM string constant is out of range");
+                throw std::runtime_error(xorstr_(
+                    "Concept VM string constant is out of range"));
             }
             text_heap.push_back(bytecode.strings[index]);
             stack.push_back(text_heap.size() - 1);
@@ -1204,7 +1222,8 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::load: {
             const auto index = read_u16(bytecode.code, ip);
             if (index >= frames.back().locals.size()) {
-                throw std::runtime_error("Concept VM local load is out of range");
+                throw std::runtime_error(
+                    xorstr_("Concept VM local load is out of range"));
             }
             stack.push_back(frames.back().locals[index]);
             break;
@@ -1213,7 +1232,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto index = read_u16(bytecode.code, ip);
             const auto value = pop();
             if (index >= frames.back().locals.size()) {
-                throw std::runtime_error("Concept VM local store is out of range");
+                throw std::runtime_error(
+                    xorstr_("Concept VM local store is out of range"));
             }
             frames.back().locals[index] = value;
             break;
@@ -1228,8 +1248,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto index = read_u16(bytecode.code, ip);
             const auto& fields = object_fields(pop());
             if (index >= fields.size()) {
-                throw std::runtime_error(
-                    "Concept VM class field load is out of range");
+                throw std::runtime_error(xorstr_(
+                    "Concept VM class field load is out of range"));
             }
             stack.push_back(fields[index]);
             break;
@@ -1239,8 +1259,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto value = pop();
             auto& fields = object_fields(pop());
             if (index >= fields.size()) {
-                throw std::runtime_error(
-                    "Concept VM class field store is out of range");
+                throw std::runtime_error(xorstr_(
+                    "Concept VM class field store is out of range"));
             }
             fields[index] = value;
             break;
@@ -1249,7 +1269,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto index = read_u16(bytecode.code, ip);
             if (index >= frames.back().locals.size()) {
                 throw std::runtime_error(
-                    "Concept VM local address is out of range");
+                    xorstr_("Concept VM local address is out of range"));
             }
             pointer_heap.push_back(
                 {PointerTarget::Kind::local, frames.back().id, index});
@@ -1262,7 +1282,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             auto& fields = object_fields(object);
             if (index >= fields.size()) {
                 throw std::runtime_error(
-                    "Concept VM field address is out of range");
+                    xorstr_("Concept VM field address is out of range"));
             }
             pointer_heap.push_back(
                 {PointerTarget::Kind::field, object, index});
@@ -1331,8 +1351,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto left = pop();
             if (type == ValueType::text) {
                 if (op != Op::equal && op != Op::not_equal) {
-                    throw std::runtime_error(
-                        "Concept VM string ordering is not supported");
+                    throw std::runtime_error(xorstr_(
+                        "Concept VM string ordering is not supported"));
                 }
                 const bool equal = text_value(text_heap, left) ==
                                    text_value(text_heap, right);
@@ -1356,7 +1376,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto target = read_u32(bytecode.code, ip);
             const auto local_count = read_u32(bytecode.code, ip);
             if (frames.size() >= maximum_call_depth) {
-                throw std::runtime_error("Concept VM call stack overflow");
+                throw std::runtime_error(
+                    xorstr_("Concept VM call stack overflow"));
             }
             frames.push_back(
                 {next_frame_id++, ip, stack.size(),
@@ -1369,11 +1390,12 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto local_count = read_u32(bytecode.code, ip);
             const auto receiver = pop();
             if (frames.size() >= maximum_call_depth) {
-                throw std::runtime_error("Concept VM call stack overflow");
+                throw std::runtime_error(
+                    xorstr_("Concept VM call stack overflow"));
             }
             if (local_count == 0) {
                 throw std::runtime_error(
-                    "Concept VM method has no receiver local");
+                    xorstr_("Concept VM method has no receiver local"));
             }
             std::vector<std::uint64_t> method_locals(local_count, 0);
             method_locals[0] = receiver;
@@ -1460,7 +1482,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         default:
-            throw std::runtime_error("Concept VM encountered an invalid opcode");
+            throw std::runtime_error(
+                xorstr_("Concept VM encountered an invalid opcode"));
         }
     }
 }

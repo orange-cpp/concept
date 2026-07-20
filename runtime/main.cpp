@@ -2,6 +2,8 @@
 #include "concept/package.hpp"
 #include "concept/vm.hpp"
 
+#include <xorstr.hpp>
+
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -38,7 +40,7 @@ int main(int argc, char** argv) {
         const auto bytecode = cpt::deserialize(payload);
         return static_cast<int>(cpt::execute(bytecode));
     } catch (const std::exception& error) {
-        std::cerr << "concept runtime: " << error.what() << '\n';
+        std::cerr << xorstr_("concept runtime: ") << error.what() << '\n';
         return 1;
     }
 }

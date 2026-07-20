@@ -18,6 +18,9 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 MSVC builds use the static CRT: `/MT` in Release and `/MTd` in Debug.
+The first CMake configure downloads a SHA-256-verified, pinned revision of
+[JustasMasiulis/xorstr](https://github.com/JustasMasiulis/xorstr) for native
+runtime string obfuscation.
 
 ## Compile a Concept program
 
@@ -198,6 +201,13 @@ contains enough information for its VMs to recover their mappings.
 Complexity decorators are also an obfuscation boundary rather than a security
 guarantee. They increase reverse-engineering cost and executable size, but a
 determined analyst can still recover program behavior.
+
+Native VM, bytecode-loader, payload-reader, and runtime diagnostic strings use
+`xorstr_()` so their plaintext is not stored directly in generated executables.
+They are decrypted when used and can still be observed in live process memory;
+this is an obfuscation boundary, not secret-key encryption. Concept source
+string constants continue to use the separate per-compilation ChaCha20 bytecode
+path described above.
 
 ## Standard TCP sockets
 

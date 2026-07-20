@@ -2,6 +2,20 @@ cmake_minimum_required(VERSION 3.24)
 
 project(concept VERSION 0.1.0 LANGUAGES CXX)
 
+include(FetchContent)
+FetchContent_Declare(
+    xorstr
+    URL https://github.com/JustasMasiulis/xorstr/archive/066c64eea5104f4e3cfbc49e39031400e086425a.tar.gz
+    URL_HASH SHA256=EF1A6F103266EBEED102656A5AA2FE90F4DDA1F5F7A930FE6D2B82AB07A0B3E0
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(xorstr)
+
+add_library(concept_xorstr INTERFACE)
+target_include_directories(concept_xorstr INTERFACE
+    "${xorstr_SOURCE_DIR}/include"
+)
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -17,6 +31,10 @@ add_library(concept_core
     src/vm.cpp
 )
 target_include_directories(concept_core PUBLIC include)
+target_link_libraries(concept_core PUBLIC concept_xorstr)
+target_compile_definitions(concept_core PRIVATE
+    JM_XORSTR_DISABLE_AVX_INTRINSICS
+)
 
 add_library(concept_frontend
     src/compiler.cpp
@@ -26,6 +44,9 @@ target_link_libraries(concept_frontend PUBLIC concept_core)
 
 add_executable(concept-runtime runtime/main.cpp)
 target_link_libraries(concept-runtime PRIVATE concept_core)
+target_compile_definitions(concept-runtime PRIVATE
+    JM_XORSTR_DISABLE_AVX_INTRINSICS
+)
 
 add_executable(concept src/main.cpp)
 target_link_libraries(concept PRIVATE concept_frontend)
@@ -65,6 +86,12 @@ if(BUILD_TESTING)
                                                   -static-libstdc++)
     endif()
     add_test(NAME concept-tests COMMAND concept-tests)
+    add_test(
+        NAME concept-runtime-xorstr
+        COMMAND ${CMAKE_COMMAND}
+            -DRUNTIME=$<TARGET_FILE:concept-runtime>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_runtime_strings.cmake
+    )
     add_test(
         NAME concept-packaged-program
         COMMAND ${CMAKE_COMMAND}
