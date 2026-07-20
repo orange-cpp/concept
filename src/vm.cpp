@@ -1,11 +1,16 @@
 #include "concept/vm.hpp"
 
 #include <bit>
+#include <charconv>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <iostream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace cpt {
@@ -57,7 +62,7 @@ std::uint64_t read_u64(const std::vector<std::uint8_t>& code,
 
 ValueType read_type(const std::vector<std::uint8_t>& code, std::size_t& ip) {
     if (ip >= code.size() ||
-        code[ip] > static_cast<std::uint8_t>(ValueType::f64)) {
+        code[ip] > static_cast<std::uint8_t>(ValueType::text)) {
         throw std::runtime_error("VM encountered an invalid value type");
     }
     return static_cast<ValueType>(code[ip++]);
@@ -119,6 +124,9 @@ std::uint64_t f64_bits(const double value) {
 }
 
 bool truthy(const ValueType type, const std::uint64_t bits) {
+    if (type == ValueType::text) {
+        throw std::runtime_error("string cannot be used as a boolean");
+    }
     if (type == ValueType::boolean) {
         return bits != 0;
     }
@@ -179,6 +187,10 @@ std::uint64_t floating_to_integral(const long double value,
 std::uint64_t convert_value(const std::uint64_t bits,
                             const ValueType source,
                             const ValueType target) {
+    if (source == ValueType::text || target == ValueType::text) {
+        throw std::runtime_error(
+            "string conversion is not supported by the Concept VM");
+    }
     if (target == ValueType::boolean) {
         return truthy(source, bits) ? 1 : 0;
     }
@@ -387,6 +399,102 @@ std::uint64_t negate_value(const ValueType type, const std::uint64_t bits) {
     return normalize_integral(type, std::uint64_t{0} - bits);
 }
 
+const std::string& text_value(const std::vector<std::string>& heap,
+                              const std::uint64_t handle) {
+    if (handle >= heap.size()) {
+        throw std::runtime_error("Concept VM string handle is invalid");
+    }
+    return heap[static_cast<std::size_t>(handle)];
+}
+
+std::string read_input_line() {
+    std::string line;
+    if (!std::getline(std::cin, line)) {
+        throw std::runtime_error("failed to read a line from standard input");
+    }
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+    return line;
+}
+
+std::string_view trim(const std::string_view value) {
+    std::size_t begin = 0;
+    while (begin < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+    std::size_t end = value.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+std::int64_t read_input_i64() {
+    const auto line = read_input_line();
+    const auto value_text = trim(line);
+    std::int64_t value = 0;
+    const auto result = std::from_chars(value_text.data(),
+                                        value_text.data() + value_text.size(),
+                                        value);
+    if (value_text.empty() || result.ec != std::errc{} ||
+        result.ptr != value_text.data() + value_text.size()) {
+        throw std::runtime_error("standard input is not a valid i64 value");
+    }
+    return value;
+}
+
+double read_input_f64() {
+    const auto line = read_input_line();
+    const auto value_text = trim(line);
+    double value = 0.0;
+    const auto result = std::from_chars(value_text.data(),
+                                        value_text.data() + value_text.size(),
+                                        value);
+    if (value_text.empty() || result.ec != std::errc{} ||
+        result.ptr != value_text.data() + value_text.size()) {
+        throw std::runtime_error("standard input is not a valid f64 value");
+    }
+    return value;
+}
+
+void print_value(const ValueType type, const std::uint64_t bits,
+                 const std::vector<std::string>& heap,
+                 const bool newline) {
+    switch (type) {
+    case ValueType::boolean:
+        std::cout << (bits == 0 ? "false" : "true");
+        break;
+    case ValueType::i8:
+    case ValueType::i16:
+    case ValueType::i32:
+    case ValueType::i64:
+        std::cout << signed_value(type, bits);
+        break;
+    case ValueType::u8:
+    case ValueType::u16:
+    case ValueType::u32:
+    case ValueType::u64:
+        std::cout << normalize_integral(type, bits);
+        break;
+    case ValueType::f32:
+        std::cout << f32_value(bits);
+        break;
+    case ValueType::f64:
+        std::cout << f64_value(bits);
+        break;
+    case ValueType::text:
+        std::cout << text_value(heap, bits);
+        break;
+    }
+    if (newline) {
+        std::cout << '\n';
+    }
+    std::cout.flush();
+}
+
 std::int64_t exit_value(const ValueType type, const std::uint64_t bits) {
     if (type == ValueType::boolean) {
         return bits == 0 ? 0 : 1;
@@ -400,7 +508,7 @@ std::int64_t exit_value(const ValueType type, const std::uint64_t bits) {
                                       : static_cast<std::int64_t>(value);
     }
     throw std::runtime_error(
-        "Concept entry point returned a floating-point value");
+        "Concept entry point returned a non-integral value");
 }
 
 } // namespace
@@ -411,6 +519,7 @@ std::int64_t execute(const Bytecode& bytecode) {
     constexpr std::size_t maximum_call_depth = 4096;
     std::vector<std::uint64_t> stack;
     std::vector<Frame> frames;
+    std::vector<std::string> text_heap;
     frames.push_back(
         {bytecode.code.size(), 0,
          std::vector<std::uint64_t>(bytecode.entry_locals, 0)});
@@ -435,6 +544,16 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::push_bits:
             stack.push_back(read_u64(bytecode.code, ip));
             break;
+        case Op::push_text: {
+            const auto index = read_u32(bytecode.code, ip);
+            if (index >= bytecode.strings.size()) {
+                throw std::runtime_error(
+                    "Concept VM string constant is out of range");
+            }
+            text_heap.push_back(bytecode.strings[index]);
+            stack.push_back(text_heap.size() - 1);
+            break;
+        }
         case Op::load: {
             const auto index = read_u16(bytecode.code, ip);
             if (index >= frames.back().locals.size()) {
@@ -491,7 +610,17 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto type = read_type(bytecode.code, ip);
             const auto right = pop();
             const auto left = pop();
-            stack.push_back(compare_values(op, type, left, right) ? 1 : 0);
+            if (type == ValueType::text) {
+                if (op != Op::equal && op != Op::not_equal) {
+                    throw std::runtime_error(
+                        "Concept VM string ordering is not supported");
+                }
+                const bool equal = text_value(text_heap, left) ==
+                                   text_value(text_heap, right);
+                stack.push_back((op == Op::equal ? equal : !equal) ? 1 : 0);
+            } else {
+                stack.push_back(compare_values(op, type, left, right) ? 1 : 0);
+            }
             break;
         }
         case Op::jump:
@@ -513,6 +642,24 @@ std::int64_t execute(const Bytecode& bytecode) {
             frames.push_back(
                 {ip, stack.size(), std::vector<std::uint64_t>(local_count, 0)});
             ip = target;
+            break;
+        }
+        case Op::input_text:
+            text_heap.push_back(read_input_line());
+            stack.push_back(text_heap.size() - 1);
+            break;
+        case Op::input_i64:
+            stack.push_back(
+                static_cast<std::uint64_t>(read_input_i64()));
+            break;
+        case Op::input_f64:
+            stack.push_back(f64_bits(read_input_f64()));
+            break;
+        case Op::print:
+        case Op::println: {
+            const auto type = read_type(bytecode.code, ip);
+            print_value(type, pop(), text_heap, op == Op::println);
+            stack.push_back(0);
             break;
         }
         case Op::return_value: {

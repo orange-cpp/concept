@@ -1,0 +1,34 @@
+fn main() -> int {
+    println("Concept calculator");
+
+    print("First number: ");
+    f64 left = input_f64();
+
+    print("Operator (+, -, *, /): ");
+    string operation = input();
+
+    print("Second number: ");
+    f64 right = input_f64();
+    f64 result = 0.0;
+
+    if (operation == "+") {
+        result = left + right;
+    } else if (operation == "-") {
+        result = left - right;
+    } else if (operation == "*") {
+        result = left * right;
+    } else if (operation == "/") {
+        if (right == 0.0) {
+            println("Cannot divide by zero.");
+            return 1;
+        }
+        result = left / right;
+    } else {
+        println("Unknown operator.");
+        return 1;
+    }
+
+    print("Result: ");
+    println(result);
+    return 0;
+}

@@ -3,9 +3,11 @@
 #include "concept/package.hpp"
 #include "concept/vm.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <sstream>
 #include <string_view>
 
 namespace {
@@ -55,6 +57,79 @@ void forward_call_test() {
     )";
     expect(cpt::execute(cpt::compile(source)) == 17,
            "calls to functions declared later should work");
+}
+
+void randomized_opcode_test() {
+    constexpr std::string_view source = R"(
+        fn helper() -> i32 { return 6 * 7; }
+        fn main() -> i32 {
+            i32 value = helper();
+            if (value == 42) { return value; }
+            return 0;
+        }
+    )";
+
+    const auto first = cpt::compile(source, "random-layout-a.concept");
+    const auto second = cpt::compile(source, "random-layout-b.concept");
+    const auto first_image = cpt::serialize(first);
+    const auto second_image = cpt::serialize(second);
+
+    expect(first.opcode_seed != second.opcode_seed,
+           "each compilation should receive a different opcode seed");
+    expect(first_image != second_image,
+           "identical source compilations should produce different bytecode");
+    constexpr std::size_t header_size = 40;
+    expect(first_image.size() == second_image.size() &&
+               !std::equal(first_image.begin() + header_size,
+                           first_image.end(),
+                           second_image.begin() + header_size),
+           "encoded opcode streams should use different numeric layouts");
+    expect(cpt::execute(cpt::deserialize(first_image)) == 42 &&
+               cpt::execute(cpt::deserialize(second_image)) == 42,
+           "every randomized opcode layout should decode and execute");
+}
+
+void console_io_test() {
+    constexpr std::string_view source = R"(
+        fn read_name() -> string {
+            return input();
+        }
+
+        fn main() -> i32 {
+            print("Name: ");
+            string name = read_name();
+            println(name);
+            i64 whole = input_i64();
+            f64 fraction = input_f64();
+            print(true);
+            println(false);
+            if (name == "Ada Lovelace") {
+                return i32(f64(whole) + fraction);
+            }
+            return 0;
+        }
+    )";
+
+    std::istringstream input("Ada Lovelace\n40\n2.5\n");
+    std::ostringstream output;
+    auto* previous_input = std::cin.rdbuf(input.rdbuf());
+    auto* previous_output = std::cout.rdbuf(output.rdbuf());
+    std::int64_t result = 0;
+    try {
+        const auto image = cpt::serialize(cpt::compile(source, "io-test.concept"));
+        result = cpt::execute(cpt::deserialize(image));
+    } catch (...) {
+        std::cin.rdbuf(previous_input);
+        std::cout.rdbuf(previous_output);
+        throw;
+    }
+    std::cin.rdbuf(previous_input);
+    std::cout.rdbuf(previous_output);
+
+    expect(result == 42,
+           "text and numeric input should be usable by Concept programs");
+    expect(output.str() == "Name: Ada Lovelace\ntruefalse\n",
+           "print and println should format values and newlines correctly");
 }
 
 void core_types_test() {
@@ -163,6 +238,8 @@ int main() {
     try {
         execution_test();
         forward_call_test();
+        randomized_opcode_test();
+        console_io_test();
         core_types_test();
         error_test();
         type_error_test();

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace cpt {
@@ -18,6 +19,7 @@ enum class ValueType : std::uint8_t {
     u64,
     f32,
     f64,
+    text,
 };
 
 [[nodiscard]] constexpr bool is_integral(const ValueType type) {
@@ -38,6 +40,7 @@ enum class ValueType : std::uint8_t {
 
 enum class Op : std::uint8_t {
     push_bits,
+    push_text,
     load,
     store,
     pop,
@@ -58,6 +61,11 @@ enum class Op : std::uint8_t {
     jump,
     jump_if_false,
     call,
+    input_text,
+    input_i64,
+    input_f64,
+    print,
+    println,
     return_value,
 };
 
@@ -66,6 +74,8 @@ struct Bytecode {
     std::uint32_t entry{};
     std::uint32_t entry_locals{};
     ValueType entry_type{ValueType::i64};
+    std::uint64_t opcode_seed{};
+    std::vector<std::string> strings;
 };
 
 [[nodiscard]] std::vector<std::uint8_t> serialize(const Bytecode& bytecode);

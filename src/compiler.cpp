@@ -1,11 +1,14 @@
 #include "concept/compiler.hpp"
 
+#include <atomic>
 #include <bit>
 #include <charconv>
+#include <chrono>
 #include <cctype>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <random>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -20,6 +23,7 @@ enum class TokenKind {
     identifier,
     integer,
     floating,
+    string_literal,
     fn_kw,
     type_kw,
     return_kw,
@@ -33,6 +37,7 @@ enum class TokenKind {
     left_brace,
     right_brace,
     semicolon,
+    comma,
     arrow,
     assign,
     plus,
@@ -90,6 +95,9 @@ ValueType value_type_from_name(const std::string_view name) {
     if (name == "f64" || name == "double") {
         return ValueType::f64;
     }
+    if (name == "string" || name == "text") {
+        return ValueType::text;
+    }
     throw std::logic_error("invalid type token");
 }
 
@@ -117,6 +125,8 @@ std::string_view value_type_name(const ValueType type) {
         return "f32";
     case ValueType::f64:
         return "f64";
+    case ValueType::text:
+        return "string";
     }
     throw std::logic_error("invalid value type");
 }
@@ -126,7 +136,30 @@ bool is_type_name(const std::string_view name) {
            name == "i32" || name == "i64" || name == "u8" ||
            name == "u16" || name == "u32" || name == "u64" ||
            name == "f32" || name == "f64" || name == "int" ||
-           name == "float" || name == "double";
+           name == "float" || name == "double" || name == "string" ||
+           name == "text";
+}
+
+std::uint64_t mix_seed(std::uint64_t value) {
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+std::uint64_t fresh_opcode_seed() {
+    static const std::uint64_t process_seed = [] {
+        std::random_device random;
+        auto seed = static_cast<std::uint64_t>(random());
+        seed = (seed << 32) ^ static_cast<std::uint64_t>(random());
+        seed ^= static_cast<std::uint64_t>(
+            std::chrono::high_resolution_clock::now()
+                .time_since_epoch()
+                .count());
+        return mix_seed(seed);
+    }();
+    static std::atomic<std::uint64_t> sequence{};
+    return mix_seed(process_seed +
+                    sequence.fetch_add(1, std::memory_order_relaxed));
 }
 
 class Lexer {
@@ -144,6 +177,26 @@ public:
         const auto line = line_;
         const auto column = column_;
         const char character = advance();
+
+        if (character == '"') {
+            while (!at_end() && peek() != '"') {
+                if (peek() == '\n' || peek() == '\r') {
+                    fail(line, column, "unterminated string literal");
+                }
+                if (advance() == '\\') {
+                    if (at_end()) {
+                        fail(line, column, "unterminated string escape");
+                    }
+                    advance();
+                }
+            }
+            if (at_end()) {
+                fail(line, column, "unterminated string literal");
+            }
+            advance();
+            return make_token(TokenKind::string_literal, start + 1,
+                              position_ - start - 2, line, column);
+        }
 
         if (is_identifier_start(character)) {
             while (!at_end() && is_identifier_part(peek())) {
@@ -216,6 +269,8 @@ public:
             return make_token(TokenKind::right_brace, start, 1, line, column);
         case ';':
             return make_token(TokenKind::semicolon, start, 1, line, column);
+        case ',':
+            return make_token(TokenKind::comma, start, 1, line, column);
         case '+':
             return make_token(TokenKind::plus, start, 1, line, column);
         case '*':
@@ -333,9 +388,11 @@ struct Expr {
     std::uint64_t bits{};
     ValueType value_type{ValueType::i64};
     std::string name;
+    std::string text;
     TokenKind op{};
     std::unique_ptr<Expr> left;
     std::unique_ptr<Expr> right;
+    std::vector<std::unique_ptr<Expr>> arguments;
 };
 
 struct Stmt {
@@ -575,6 +632,15 @@ private:
     }
 
     std::unique_ptr<Expr> parse_primary() {
+        if (current_.kind == TokenKind::string_literal) {
+            auto expression = std::make_unique<Expr>();
+            expression->kind = Expr::Kind::literal;
+            expression->token = current_;
+            expression->value_type = ValueType::text;
+            expression->text = decode_string(current_);
+            advance();
+            return expression;
+        }
         if (current_.kind == TokenKind::integer) {
             auto expression = std::make_unique<Expr>();
             expression->kind = Expr::Kind::literal;
@@ -638,8 +704,12 @@ private:
             advance();
             if (match(TokenKind::left_paren)) {
                 expression->kind = Expr::Kind::call;
-                consume(TokenKind::right_paren,
-                        "function arguments are not supported yet; expected ')'");
+                if (current_.kind != TokenKind::right_paren) {
+                    do {
+                        expression->arguments.push_back(parse_expression());
+                    } while (match(TokenKind::comma));
+                }
+                consume(TokenKind::right_paren, "expected ')' after arguments");
             } else {
                 expression->kind = Expr::Kind::variable;
             }
@@ -651,6 +721,44 @@ private:
             return expression;
         }
         fail(current_, "expected expression");
+    }
+
+    std::string decode_string(const Token& token) const {
+        std::string value;
+        value.reserve(token.text.size());
+        for (std::size_t index = 0; index < token.text.size(); ++index) {
+            const char character = token.text[index];
+            if (character != '\\') {
+                value.push_back(character);
+                continue;
+            }
+            if (++index >= token.text.size()) {
+                fail(token, "unterminated string escape");
+            }
+            switch (token.text[index]) {
+            case '\\':
+                value.push_back('\\');
+                break;
+            case '"':
+                value.push_back('"');
+                break;
+            case 'n':
+                value.push_back('\n');
+                break;
+            case 'r':
+                value.push_back('\r');
+                break;
+            case 't':
+                value.push_back('\t');
+                break;
+            case '0':
+                value.push_back('\0');
+                break;
+            default:
+                fail(token, "unsupported string escape");
+            }
+        }
+        return value;
     }
 
     std::unique_ptr<Expr> make_binary(std::unique_ptr<Expr> left) {
@@ -719,6 +827,8 @@ public:
         result.entry = main->second.entry;
         result.entry_locals = main->second.locals;
         result.entry_type = main->second.return_type;
+        result.opcode_seed = fresh_opcode_seed();
+        result.strings = std::move(strings_);
         if (!is_integral(result.entry_type) &&
             result.entry_type != ValueType::boolean) {
             throw CompileError(std::string(filename_) +
@@ -735,6 +845,7 @@ private:
     std::unordered_map<std::string, FunctionInfo> function_info_;
     std::unordered_map<std::string, LocalInfo> locals_;
     std::vector<CallPatch> call_patches_;
+    std::vector<std::string> strings_;
     ValueType current_return_type_{ValueType::i64};
 
     [[noreturn]] void fail(const Token& token,
@@ -747,6 +858,10 @@ private:
     void register_functions() {
         for (const auto& function : functions_) {
             const std::string name(function.name.text);
+            if (is_builtin_name(name)) {
+                fail(function.name,
+                     "function name '" + name + "' is reserved by the VM");
+            }
             if (!function_info_
                      .emplace(name,
                               FunctionInfo{0, 0, function.return_type})
@@ -765,8 +880,7 @@ private:
             compile_statement(*statement);
         }
 
-        emit(Op::push_bits);
-        emit_u64(0);
+        emit_default_value(function.return_type);
         emit(Op::return_value);
         info.locals = static_cast<std::uint32_t>(locals_.size());
     }
@@ -793,8 +907,7 @@ private:
                 compile_expression_as(*statement.expression,
                                       statement.value_type);
             } else {
-                emit(Op::push_bits);
-                emit_u64(0);
+                emit_default_value(statement.value_type);
             }
             emit(Op::store);
             emit_u16(index);
@@ -848,8 +961,13 @@ private:
     ValueType compile_expression(const Expr& expression) {
         switch (expression.kind) {
         case Expr::Kind::literal:
-            emit(Op::push_bits);
-            emit_u64(expression.bits);
+            if (expression.value_type == ValueType::text) {
+                emit(Op::push_text);
+                emit_u32(add_string(expression.text));
+            } else {
+                emit(Op::push_bits);
+                emit_u64(expression.bits);
+            }
             return expression.value_type;
         case Expr::Kind::variable: {
             const auto& local = lookup_local(expression.token, expression.name);
@@ -858,8 +976,15 @@ private:
             return local.type;
         }
         case Expr::Kind::call: {
+            if (is_builtin_name(expression.name)) {
+                return compile_builtin(expression);
+            }
             const auto& function = lookup_function(expression.token,
                                                    expression.name);
+            if (!expression.arguments.empty()) {
+                fail(expression.token,
+                     "user-defined function parameters are not supported yet");
+            }
             emit(Op::call);
             const auto target_offset = reserve_u32();
             const auto locals_offset = reserve_u32();
@@ -869,7 +994,8 @@ private:
         }
         case Expr::Kind::cast: {
             const auto source_type = compile_expression(*expression.right);
-            emit_conversion(source_type, expression.value_type);
+            emit_conversion(source_type, expression.value_type,
+                            expression.token);
             return expression.value_type;
         }
         case Expr::Kind::unary: {
@@ -908,7 +1034,67 @@ private:
     void compile_expression_as(const Expr& expression,
                                const ValueType target_type) {
         const auto source_type = compile_expression(expression);
-        emit_conversion(source_type, target_type);
+        emit_conversion(source_type, target_type, expression.token);
+    }
+
+    [[nodiscard]] static bool is_builtin_name(const std::string_view name) {
+        return name == "input" || name == "input_text" ||
+               name == "input_i64" || name == "input_f64" ||
+               name == "print" || name == "println";
+    }
+
+    [[nodiscard]] ValueType builtin_type(const Expr& expression) const {
+        const auto require_arguments = [&](const std::size_t expected) {
+            if (expression.arguments.size() != expected) {
+                fail(expression.token,
+                     "builtin '" + expression.name + "' expects " +
+                         std::to_string(expected) + " argument" +
+                         (expected == 1 ? "" : "s"));
+            }
+        };
+
+        if (expression.name == "input" ||
+            expression.name == "input_text") {
+            require_arguments(0);
+            return ValueType::text;
+        }
+        if (expression.name == "input_i64") {
+            require_arguments(0);
+            return ValueType::i64;
+        }
+        if (expression.name == "input_f64") {
+            require_arguments(0);
+            return ValueType::f64;
+        }
+        if (expression.name == "print" || expression.name == "println") {
+            require_arguments(1);
+            static_cast<void>(expression_type(*expression.arguments.front()));
+            return ValueType::i64;
+        }
+        throw std::logic_error("invalid Concept builtin");
+    }
+
+    ValueType compile_builtin(const Expr& expression) {
+        const auto result_type = builtin_type(expression);
+        if (expression.name == "input" ||
+            expression.name == "input_text") {
+            emit(Op::input_text);
+            return result_type;
+        }
+        if (expression.name == "input_i64") {
+            emit(Op::input_i64);
+            return result_type;
+        }
+        if (expression.name == "input_f64") {
+            emit(Op::input_f64);
+            return result_type;
+        }
+
+        const auto argument_type =
+            compile_expression(*expression.arguments.front());
+        emit(expression.name == "print" ? Op::print : Op::println);
+        emit_type(argument_type);
+        return result_type;
     }
 
     [[nodiscard]] ValueType expression_type(const Expr& expression) const {
@@ -919,6 +1105,13 @@ private:
         case Expr::Kind::variable:
             return lookup_local(expression.token, expression.name).type;
         case Expr::Kind::call:
+            if (is_builtin_name(expression.name)) {
+                return builtin_type(expression);
+            }
+            if (!expression.arguments.empty()) {
+                fail(expression.token,
+                     "user-defined function parameters are not supported yet");
+            }
             return lookup_function(expression.token, expression.name).return_type;
         case Expr::Kind::unary: {
             const auto operand_type = expression_type(*expression.right);
@@ -969,6 +1162,14 @@ private:
                      "bool supports only '==' and '!=' comparisons");
             }
             return ValueType::boolean;
+        }
+        if (left == ValueType::text && right == ValueType::text) {
+            if (expression.op != TokenKind::equal &&
+                expression.op != TokenKind::not_equal) {
+                fail(expression.token,
+                     "string supports only '==' and '!=' comparisons");
+            }
+            return ValueType::text;
         }
         return common_numeric_type(expression, left, right);
     }
@@ -1110,15 +1311,39 @@ private:
         }
     }
 
+    void emit_default_value(const ValueType type) {
+        if (type == ValueType::text) {
+            emit(Op::push_text);
+            emit_u32(add_string(""));
+            return;
+        }
+        emit(Op::push_bits);
+        emit_u64(0);
+    }
+
+    std::uint32_t add_string(const std::string& value) {
+        if (strings_.size() >= std::numeric_limits<std::uint32_t>::max()) {
+            throw CompileError("too many string constants");
+        }
+        strings_.push_back(value);
+        return static_cast<std::uint32_t>(strings_.size() - 1);
+    }
+
     void emit(const Op op) { code_.push_back(static_cast<std::uint8_t>(op)); }
 
     void emit_type(const ValueType type) {
         code_.push_back(static_cast<std::uint8_t>(type));
     }
 
-    void emit_conversion(const ValueType source, const ValueType target) {
+    void emit_conversion(const ValueType source, const ValueType target,
+                         const Token& token) {
         if (source == target) {
             return;
+        }
+        if (source == ValueType::text || target == ValueType::text) {
+            fail(token, "cannot convert " +
+                            std::string(value_type_name(source)) + " to " +
+                            std::string(value_type_name(target)));
         }
         emit(Op::convert);
         emit_type(source);

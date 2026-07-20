@@ -76,4 +76,13 @@ if(BUILD_TESTING)
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-types-smoke.exe
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
     )
+    add_test(
+        NAME concept-packaged-calculator
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/calculator.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-calculator-smoke.exe
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/calculator-input.txt
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_calculator.cmake
+    )
 endif()

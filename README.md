@@ -29,6 +29,13 @@ For a single-config generator, the compiler is normally at `build/concept.exe`
 instead. The compiler locates `concept-runtime.exe` beside itself; use
 `--runtime <path>` to select it explicitly.
 
+The interactive calculator example can be built and run with:
+
+```powershell
+.\build\Release\concept.exe .\examples\calculator.concept -o calculator.exe
+.\calculator.exe
+```
+
 ## Current syntax
 
 ```c
@@ -57,13 +64,21 @@ The bootstrap subset supports:
 - `bool`, signed `i8`/`i16`/`i32`/`i64`, unsigned
   `u8`/`u16`/`u32`/`u64`, and floating `f32`/`f64` values;
 - aliases `int` = `i32`, `float` = `f32`, and `double` = `f64`;
-- integer, floating-point, `true`, and `false` literals;
+- owned `string` values and escaped string literals;
+- integer, floating-point, string, `true`, and `false` literals;
 - explicit casts such as `u8(value)`, `f64(value)`, and `bool(value)`;
 - no-argument typed functions, including forward calls and recursion;
 - typed local variables, assignment, blocks, `if`/`else`, and `while`;
 - `+`, `-`, `*`, `/`, `%`, unary `-` and `!`;
 - `==`, `!=`, `<`, `<=`, `>`, and `>=`;
+- `input()`/`input_text()` for whole lines, plus `input_i64()` and
+  `input_f64()` for parsed numeric lines;
+- `print(value)` and `println(value)` for every core value type;
 - `//` line comments.
+
+Strings currently support storage, function returns, printing, and `==`/`!=`.
+Concatenation, indexing, and conversion between strings and numeric values are
+not implemented yet.
 
 Every program must define `main` with an integral or `bool` return type. Its
 result becomes the executable's process exit code. Numeric values are converted
@@ -85,6 +100,13 @@ source -> lexer/parser -> bytecode compiler -> bytecode image
 The runtime reads the trailer from its own executable, verifies and deserializes
 the bytecode, and executes it on a stack VM. The bytecode image is versioned so
 the instruction set can evolve deliberately.
+
+Every compiler invocation generates a fresh opcode-layout seed. That seed
+shuffles the VM's instruction bytes to unique values across the full `0..255`
+range, so compiling identical source twice produces different bytecode. The
+runtime reconstructs the inverse mapping before validation and execution. This
+is an obfuscation layer, not encryption: the executable necessarily contains
+enough information for its VM to recover the mapping.
 
 Self-hosting is a later bootstrap stage: extend this subset until a Concept
 compiler can be written in Concept, compile it with the C++ compiler, then package
