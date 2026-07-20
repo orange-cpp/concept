@@ -1,0 +1,109 @@
+// Concept-only growable array for core value types.
+//
+// Import as `import std::array;` and instantiate, for example,
+// `std::array<float> values;`.
+// Until Concept supports method parameters, `value` and `index` are the input
+// fields used by push(), get(), set(), and valid().
+
+class std::array<T> {
+    T* data;
+    u64 length;
+    u64 capacity;
+    u64 index;
+    T value;
+
+    fn grow() -> bool {
+        u64 next_capacity = 4;
+        if (this.capacity != 0) {
+            next_capacity = this.capacity * 2;
+        }
+
+        // Eight bytes per element covers every current core value type.
+        T* replacement = malloc(next_capacity * 8);
+        u64 cursor = 0;
+        while (cursor < this.length) {
+            replacement[cursor] = this.data[cursor];
+            cursor = cursor + 1;
+        }
+
+        if (this.capacity != 0) {
+            free(this.data);
+        }
+        this.data = replacement;
+        this.capacity = next_capacity;
+        return true;
+    }
+
+    fn push() -> bool {
+        if (this.length == this.capacity) {
+            if (!this.grow()) {
+                return false;
+            }
+        }
+        this.data[this.length] = this.value;
+        this.length = this.length + 1;
+        return true;
+    }
+
+    fn valid() -> bool {
+        return this.index < this.length;
+    }
+
+    fn get() -> T {
+        if (!this.valid()) {
+            T empty_value;
+            return empty_value;
+        }
+        return this.data[this.index];
+    }
+
+    fn set() -> bool {
+        if (!this.valid()) {
+            return false;
+        }
+        this.data[this.index] = this.value;
+        return true;
+    }
+
+    fn pop() -> bool {
+        if (this.length == 0) {
+            return false;
+        }
+        this.length = this.length - 1;
+        this.index = this.length;
+        this.value = this.data[this.index];
+        T empty_value;
+        this.data[this.index] = empty_value;
+        return true;
+    }
+
+    fn clear() -> bool {
+        this.length = 0;
+        this.index = 0;
+        T empty_value;
+        this.value = empty_value;
+        return true;
+    }
+
+    fn size() -> u64 {
+        return this.length;
+    }
+
+    fn empty() -> bool {
+        return this.length == 0;
+    }
+
+    fn destroy() -> bool {
+        if (this.capacity != 0) {
+            free(this.data);
+        }
+        T* empty_data;
+        T empty_value;
+        this.data = empty_data;
+        this.length = 0;
+        this.capacity = 0;
+        this.index = 0;
+        this.value = empty_value;
+        return true;
+    }
+}

@@ -81,12 +81,18 @@ core-type         = "bool" | "i8" | "i16" | "i32" | "i64"
                   | "u8" | "u16" | "u32" | "u64"
                   | "f32" | "f64" | "int" | "float" | "double"
                   | "string" | "text" ;
-local-type        = ( core-type | qualified-identifier ), { "*" } ;
-class-declaration = "class", identifier, "{",
+generic-parameter = identifier ;
+generic-class-type = qualified-identifier, "<", core-type, ">" ;
+local-type        = ( core-type | qualified-identifier
+                    | generic-class-type ), { "*" } ;
+class-declaration = "class", qualified-identifier,
+                    [ "<", identifier, ">" ], "{",
                     { field-declaration | function-declaration }, "}" ;
-field-declaration = core-type, { "*" }, identifier, ";" ;
+field-declaration = ( core-type | generic-parameter ),
+                    { "*" }, identifier, ";" ;
 function-declaration = { decorator }, "fn", identifier,
-                       "(", ")", "->", core-type, block ;
+                       "(", ")", "->",
+                       ( core-type | generic-parameter ), block ;
 decorator         = "@complexity(", decimal-integer, ")" ;
 block             = "{", { statement }, "}" ;
 ```
@@ -126,17 +132,55 @@ Core locals receive their default value when no initializer is present. A class
 local with no initializer automatically creates an instance. An uninitialized
 pointer is null.
 
-Assignment targets may be locals, fields, or dereferenced pointers:
+Assignment targets may be locals, fields, indexed elements, or dereferenced
+pointers:
 
 ```c
 answer = 40 + 2;
 object.value = answer;
+values[2] = answer;
 *pointer = answer;
 ```
 
 Blocks do not create separate local-variable scopes in the current compiler.
 Local names are function-scoped and cannot be redeclared elsewhere in the same
 function.
+
+## Arrays and heap memory
+
+A fixed-size local array places a positive constant length after its name:
+
+```c
+i32 values[4];
+string labels[2];
+i32* pointers[8];
+
+values[0] = 40;
+values[1] = 2;
+i32 answer = values[0] + values[1];
+```
+
+Array elements are zero-initialized. An array name converts to a pointer to its
+first element, so indexing also works on pointers. Array initializers and arrays
+of class objects are not currently supported. Every indexed read or write is
+bounds-checked by the VM. A pointer to a local array expires when its declaring
+function returns.
+
+`malloc(byte_count)` allocates zero-initialized bytes from the shared VM heap.
+Its result adopts the pointer type of its destination:
+
+```c
+i32* memory = malloc(4 * 10);
+memory[0] = 42;
+i32 value = *(memory + 0);
+free(memory);
+```
+
+`free(pointer)` releases a block created by `malloc` and returns `0`. The pointer
+must be the original base pointer. Passing null is allowed. Freeing an array,
+freeing the same block twice, dereferencing freed memory, or accessing outside a
+block stops execution with a VM error. Heap and array state is shared by every
+VM context in a multi-VM executable.
 
 ## Statements and control flow
 
@@ -149,7 +193,8 @@ statement = block
           | "if", "(", expression, ")", statement,
             [ "else", statement ]
           | "while", "(", expression, ")", statement ;
-variable-declaration = local-type, identifier, [ "=", expression ] ;
+variable-declaration = local-type, identifier,
+                       [ "[", integer-literal, "]" | "=", expression ] ;
 ```
 
 Examples:
@@ -177,10 +222,10 @@ Operators are listed from highest to lowest precedence:
 | Level | Syntax | Notes |
 |---|---|---|
 | Primary | literals, names, `call()`, casts, `(expression)` | — |
-| Postfix | `object.field`, `object.method()` | Left-associative |
+| Postfix | `value[index]`, `object.field`, `object.method()` | Left-associative |
 | Unary | `-value`, `!value`, `&value`, `*pointer` | Right-associative |
 | Multiplicative | `*`, `/`, `%` | `%` requires integral operands |
-| Additive | `+`, `-` | Numeric operands only |
+| Additive | `+`, `-` | Numeric operands or supported pointer arithmetic |
 | Relational | `<`, `<=`, `>`, `>=` | Numeric operands only |
 | Equality | `==`, `!=` | Numeric, `bool`, or matching strings |
 
@@ -192,8 +237,9 @@ before selecting a field:
 ```
 
 There are currently no logical `&&` or `||`, bitwise operators, increment or
-decrement operators, compound assignments, or ternary expressions. Pointers
-and class objects cannot be used with binary operators.
+decrement operators, compound assignments, or ternary expressions. Pointer
+arithmetic supports `pointer + integer`, `integer + pointer`, and
+`pointer - integer`; class objects cannot be used with binary operators.
 
 ## Core value casts
 
@@ -267,9 +313,9 @@ Other hosts report native dereferencing as unavailable. Native `string` and
 class pointers are not supported.
 
 `ptr_cast` is intentionally explicit because native memory access bypasses the
-safety of normal VM references. Pointer arithmetic, pointer comparisons,
-general pointer-to-pointer casts, and pointer function parameters or returns are
-not implemented yet.
+safety of normal VM references. Element-scaled pointer arithmetic and indexing
+work on native pointers. Pointer comparisons, general pointer-to-pointer casts,
+and pointer function parameters or returns are not implemented yet.
 
 ## Classes
 
@@ -308,6 +354,32 @@ alias.value = 42;
 Methods return core values and currently take no parameters. Class-valued
 fields, user-defined constructors, inheritance, visibility modifiers, static
 members, and method overloading are not implemented.
+
+## Generic classes
+
+A class may declare one generic type parameter and use it for fields, pointer
+fields, locals, fixed arrays, and method return values:
+
+```c
+class Box<T> {
+    T value;
+
+    fn get() -> T {
+        return this.value;
+    }
+}
+
+fn main() -> int {
+    Box<float> box;
+    box.value = 42.0;
+    return i32(box.get());
+}
+```
+
+Each used specialization is monomorphized into independent bytecode. Generic
+arguments must currently be core types, and only one type parameter is
+supported. Generic functions, nested generic arguments, pointer arguments such
+as `Box<i32*>`, and class arguments such as `Box<Counter>` are not available.
 
 ## Imports and qualified names
 
@@ -365,6 +437,46 @@ Input parse failures stop the VM with an error. `print` and `println` accept
 core values, but not pointers or class objects. Both return `0`, so they can be
 used as expression statements.
 
+## `std::array<T>`
+
+`std::array<T>` is a growable container implemented entirely in Concept source
+for any core value type. Import it with `import std::array;`:
+
+```c
+import std::array;
+
+fn main() -> int {
+    std::array<float> values;
+    values.value = 42.5;
+    values.push();
+
+    values.index = 0;
+    float answer = values.get();
+    values.destroy();
+    return i32(answer);
+}
+```
+
+Concept does not have method parameters yet, so `value` supplies a `T` argument
+and `index` supplies a `u64` argument before an operation. The container also
+exposes its current `length` and `capacity` fields.
+
+| Method | Return | Meaning |
+|---|---|---|
+| `push()` | `bool` | Append `value`, growing capacity geometrically |
+| `valid()` | `bool` | Whether `index` is less than the current length |
+| `get()` | `T` | Read `index`, or return the default `T` value when invalid |
+| `set()` | `bool` | Store `value` at a valid `index` |
+| `pop()` | `bool` | Remove the last value and place it in `value` |
+| `clear()` | `bool` | Remove all logical elements without releasing capacity |
+| `size()` | `u64` | Return the current element count |
+| `empty()` | `bool` | Whether the array has no elements |
+| `destroy()` | `bool` | Release storage; safe to call again |
+
+There is no automatic destructor yet, so call `destroy()` when the container is
+no longer needed. Its growth, copying, indexing, and cleanup are defined in
+`concept/std/array.concept`; the VM has no special dynamic-array implementation.
+
 ## `std::Socket`
 
 Import the standard socket module before using its qualified class:
@@ -406,7 +518,8 @@ still apply.
 
 ```ebnf
 statement      = block
-               | local-type, identifier, [ "=", expression ], ";"
+               | local-type, identifier,
+                 [ "[", integer-literal, "]" | "=", expression ], ";"
                | lvalue, "=", expression, ";"
                | "return", expression, ";"
                | "if", "(", expression, ")", statement,
@@ -414,7 +527,8 @@ statement      = block
                | "while", "(", expression, ")", statement
                | expression, ";" ;
 
-lvalue         = identifier | member-expression | "*", unary-expression ;
+lvalue         = identifier | member-expression | index-expression
+               | "*", unary-expression ;
 expression     = equality-expression ;
 equality       = comparison, { ( "==" | "!=" ), comparison } ;
 comparison     = additive, { ( "<" | "<=" | ">" | ">=" ), additive } ;
@@ -422,10 +536,12 @@ additive       = multiplicative, { ( "+" | "-" ), multiplicative } ;
 multiplicative = unary, { ( "*" | "/" | "%" ), unary } ;
 unary          = ( "-" | "!" | "&" | "*" ), unary | postfix ;
 postfix        = primary,
-                 { ".", identifier, [ "(", [ arguments ], ")" ] } ;
+                 { "[", expression, "]"
+                 | ".", identifier, [ "(", [ arguments ], ")" ] } ;
 primary        = literal
                | identifier
                | identifier, "(", [ arguments ], ")"
+               | generic-class-type, "(", [ arguments ], ")"
                | core-type, "(", expression, ")"
                | "ptr_cast", "<", core-type, ">", "(", expression, ")"
                | "(", expression, ")" ;
@@ -437,15 +553,17 @@ arguments      = expression, { ",", expression } ;
 The current language does not yet provide:
 
 - function or user-method parameters;
+- generic functions, multiple generic parameters, or non-core generic
+  arguments;
 - pointer, class, or `void` function returns;
-- arrays, indexing, allocation, or object destruction;
+- object destruction;
 - `for`, `do`, `switch`, `break`, or `continue`;
 - logical short-circuit, bitwise, compound-assignment, increment, decrement, or
   ternary operators;
 - string concatenation, indexing, or numeric conversion;
 - constructors with arguments, class-valued fields, inheritance, visibility,
   static members, or overloading;
-- pointer arithmetic, pointer comparison, or general pointer casts.
+- pointer comparison or general pointer casts.
 
 These omissions are syntax errors or compile-time type errors rather than
 silently accepted features.

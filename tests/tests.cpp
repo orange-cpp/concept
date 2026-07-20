@@ -4,6 +4,7 @@
 #include "concept/vm.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -273,23 +274,23 @@ void pointer_test() {
            "ptr_cast should accept hexadecimal integral addresses");
 
 #ifdef _WIN32
-    std::uint32_t native_value = 41;
+    std::array<std::uint32_t, 2> native_values{0, 41};
     std::ostringstream native_source;
     native_source << R"(
         fn main() -> int {
             u32* pointer = ptr_cast<u32>(0x)"
                   << std::hex
-                  << reinterpret_cast<std::uintptr_t>(&native_value) << R"();
-            *pointer = *pointer + 1;
-            return i32(*pointer);
+                  << reinterpret_cast<std::uintptr_t>(native_values.data()) << R"();
+            pointer[1] = pointer[1] + 1;
+            return i32(*(pointer + 1));
         }
     )";
     const auto native_bytecode =
         cpt::compile(native_source.str(), "native-pointer-test.concept", 8);
     expect(cpt::execute(cpt::deserialize(cpt::serialize(native_bytecode))) ==
                42 &&
-               native_value == 42,
-           "ptr_cast pointers should read and write valid process memory");
+               native_values[1] == 42,
+           "ptr_cast pointers should index valid process memory");
 #endif
 
     try {
@@ -380,6 +381,134 @@ void pointer_test() {
     }
 }
 
+void array_heap_test() {
+    constexpr std::string_view source = R"(
+        @complexity(50)
+        fn main() -> int {
+            i32 fixed[4];
+            fixed[0] = 20;
+            fixed[1] = 1;
+            i32* middle = fixed + 1;
+            middle[1] = fixed[0] + fixed[1];
+
+            i32* pointers[2];
+            pointers[0] = &fixed[2];
+            pointers[1] = pointers[0];
+
+            string labels[2];
+            labels[0] = "heap";
+            if (labels[1] != "") { return 1; }
+
+            i32* dynamic = malloc(12);
+            dynamic[0] = fixed[0];
+            *(dynamic + 1) = fixed[1];
+            dynamic[2] = dynamic[0] + dynamic[1];
+            i32 answer = *pointers[1] + dynamic[2];
+            free(dynamic);
+            return answer;
+        }
+    )";
+
+    const auto compiled = cpt::compile(source, "array-heap-test.concept", 8);
+    expect(cpt::execute(compiled) == 42,
+           "fixed arrays, pointer arrays, malloc, and free should execute");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
+           "array and heap state should be shared across eight VMs");
+
+    try {
+        static_cast<void>(cpt::execute(cpt::compile(R"(
+            fn main() -> int {
+                i32 values[2];
+                values[2] = 42;
+                return 0;
+            }
+        )")));
+        expect(false, "out-of-bounds array writes should fail at runtime");
+    } catch (const std::runtime_error&) {
+    }
+
+    try {
+        static_cast<void>(cpt::execute(cpt::compile(R"(
+            class Holder {
+                i32* pointer;
+                fn capture() -> int {
+                    i32 values[1];
+                    values[0] = 42;
+                    this.pointer = values;
+                    return 0;
+                }
+            }
+            fn main() -> int {
+                Holder holder;
+                holder.capture();
+                return holder.pointer[0];
+            }
+        )")));
+        expect(false, "pointers to expired local arrays should fail");
+    } catch (const std::runtime_error&) {
+    }
+
+    try {
+        static_cast<void>(cpt::execute(cpt::compile(R"(
+            fn main() -> int {
+                i32* memory = malloc(4);
+                *memory = 42;
+                free(memory);
+                return *memory;
+            }
+        )")));
+        expect(false, "use-after-free should fail at runtime");
+    } catch (const std::runtime_error&) {
+    }
+
+    try {
+        static_cast<void>(cpt::execute(cpt::compile(R"(
+            fn main() -> int {
+                i32 values[2];
+                free(values);
+                return 0;
+            }
+        )")));
+        expect(false, "freeing fixed array storage should fail at runtime");
+    } catch (const std::runtime_error&) {
+    }
+
+    try {
+        static_cast<void>(cpt::execute(cpt::compile(R"(
+            fn main() -> int {
+                i32* memory = malloc(4);
+                free(memory);
+                free(memory);
+                return 0;
+            }
+        )")));
+        expect(false, "double free should fail at runtime");
+    } catch (const std::runtime_error&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn main() -> int {
+                i32 values[0];
+                return 0;
+            }
+        )"));
+        expect(false, "zero-length arrays should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn main() -> int {
+                i32 values[2];
+                return values[1.5];
+            }
+        )"));
+        expect(false, "floating-point array indexes should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
+}
+
 void import_test() {
     const auto source_root =
         std::filesystem::path(__FILE__).parent_path().parent_path();
@@ -440,6 +569,119 @@ void import_test() {
         expect(false, "legacy global socket functions should not be available");
     } catch (const cpt::CompileError&) {
     }
+}
+
+void generic_class_test() {
+    constexpr std::string_view source = R"(
+        class Box<T> {
+            T value;
+
+            fn get() -> T {
+                return this.value;
+            }
+
+            fn default_value() -> T {
+                T values[1];
+                return values[0];
+            }
+        }
+
+        fn main() -> int {
+            Box<float> number = Box<float>();
+            number.value = 41.5;
+            Box<f32> alias = number;
+
+            Box<string> label;
+            label.value = "generic";
+            if (label.get() != "generic") { return 1; }
+            if (label.default_value() != "") { return 2; }
+            return i32(alias.get() + 0.5);
+        }
+    )";
+
+    const auto compiled = cpt::compile(source, "generic-class-test.concept", 8);
+    expect(cpt::execute(compiled) == 42,
+           "generic classes should specialize fields, locals, and returns");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
+           "generic class specializations should survive eight-VM bytecode");
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            class Box<T> { T value; }
+            fn main() -> int {
+                Box value;
+                return 0;
+            }
+        )"));
+        expect(false, "generic classes should require a core type argument");
+    } catch (const cpt::CompileError&) {
+    }
+}
+
+void dynamic_array_test() {
+    const auto source_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path();
+    const auto standard_modules = source_root / "concept";
+    constexpr std::string_view source = R"(
+        import std::array;
+
+        fn main() -> int {
+            std::array<float> values;
+            if (!values.empty()) { return 1; }
+
+            float number = 0.0;
+            while (number < 40.0) {
+                values.value = number;
+                if (!values.push()) { return 2; }
+                number = number + 1.0;
+            }
+            if (values.size() != 40) { return 3; }
+
+            values.index = 20;
+            values.value = 22.0;
+            if (!values.set()) { return 4; }
+            if (values.get() != f32(22.0)) { return 5; }
+
+            values.index = 100;
+            if (values.valid()) { return 6; }
+            if (values.get() != 0) { return 7; }
+            if (values.set()) { return 8; }
+
+            if (!values.pop()) { return 9; }
+            if (values.value != f32(39.0)) { return 10; }
+            if (!values.clear()) { return 11; }
+            if (!values.empty()) { return 12; }
+
+            values.value = 42.0;
+            if (!values.push()) { return 13; }
+            values.index = 0;
+            i32 answer = i32(values.get());
+            if (!values.destroy()) { return 14; }
+            if (!values.destroy()) { return 15; }
+
+            std::array<i32> integers;
+            integers.value = 7;
+            integers.push();
+            integers.index = 0;
+            if (integers.get() != 7) { return 16; }
+            integers.destroy();
+
+            std::array<string> labels;
+            labels.value = "generic";
+            labels.push();
+            labels.index = 0;
+            if (labels.get() != "generic") { return 17; }
+            labels.destroy();
+            return answer;
+        }
+    )";
+
+    const auto compiled = cpt::compile(
+        source, "dynamic-array-test.concept", 8, standard_modules.string());
+    expect(cpt::execute(compiled) == 42,
+           "std::array<T> should specialize for multiple core types");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
+           "generic arrays should execute across eight serialized VMs");
 }
 
 void console_io_test() {
@@ -619,7 +861,10 @@ int main() {
         complexity_decorator_test();
         class_test();
         pointer_test();
+        array_heap_test();
         import_test();
+        generic_class_test();
+        dynamic_array_test();
         console_io_test();
         core_types_test();
         error_test();

@@ -1,0 +1,34 @@
+import std::array;
+
+@complexity(50)
+fn main() -> int {
+    std::array<float> values;
+
+    float number = 0.0;
+    while (number < 40.0) {
+        values.value = number;
+        if (!values.push()) {
+            return 1;
+        }
+        number = number + 1.0;
+    }
+
+    if (values.size() != 40) {
+        return 2;
+    }
+
+    values.index = 20;
+    values.value = 22.0;
+    if (!values.set()) {
+        return 3;
+    }
+
+    i32 answer = i32(values.get() + 20.0);
+    if (!values.pop()) {
+        return 4;
+    }
+    if (!values.destroy()) {
+        return 5;
+    }
+    return answer;
+}

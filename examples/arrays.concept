@@ -1,0 +1,16 @@
+@complexity(50)
+fn main() -> int {
+    i32 fixed[4];
+    fixed[0] = 20;
+    fixed[1] = 1;
+    fixed[2] = fixed[0] + fixed[1];
+
+    i32* dynamic = malloc(12);
+    dynamic[0] = fixed[0];
+    *(dynamic + 1) = fixed[1];
+    dynamic[2] = dynamic[0] + dynamic[1];
+
+    i32 answer = fixed[2] + dynamic[2];
+    free(dynamic);
+    return answer;
+}

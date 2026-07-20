@@ -50,12 +50,12 @@ target_compile_definitions(concept-runtime PRIVATE
 
 add_executable(concept src/main.cpp)
 target_link_libraries(concept PRIVATE concept_frontend)
-add_dependencies(concept concept-runtime)
-add_custom_command(TARGET concept POST_BUILD
+add_custom_target(concept-modules
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/concept"
-        "$<TARGET_FILE_DIR:concept>/concept"
+        "$<TARGET_FILE_DIR:concept-runtime>/concept"
 )
+add_dependencies(concept concept-runtime concept-modules)
 
 if(MINGW)
     foreach(target concept-runtime concept)
@@ -139,6 +139,22 @@ if(BUILD_TESTING)
             -DCOMPILER=$<TARGET_FILE:concept>
             -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/pointers.concept
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-pointers-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-arrays
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/arrays.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-arrays-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-dynamic-array
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/dynamic-array.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-dynamic-array-smoke.exe
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
     )
 endif()

@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <iostream>
 #include <stdexcept>
@@ -45,10 +46,18 @@ struct Frame {
 };
 
 struct PointerTarget {
-    enum class Kind { local, field, native_address } kind{Kind::local};
+    enum class Kind { local, field, native_address, heap_block }
+        kind{Kind::local};
     std::uint64_t owner{};
-    std::uint16_t index{};
+    std::uint64_t index{};
     ValueType native_type{ValueType::u64};
+};
+
+struct HeapBlock {
+    std::vector<std::uint8_t> bytes;
+    bool dynamic{};
+    bool freed{};
+    std::uint64_t frame_id{};
 };
 
 #ifdef _WIN32
@@ -371,6 +380,11 @@ std::size_t native_value_size(const ValueType type) {
             xorstr_("Concept VM cannot access native string memory"));
     }
     throw std::logic_error(xorstr_("invalid native pointer value type"));
+}
+
+std::size_t heap_value_size(const ValueType type) {
+    return type == ValueType::text ? sizeof(std::uint64_t)
+                                   : native_value_size(type);
 }
 
 bool read_native_value(const std::uint64_t address, const ValueType type,
@@ -1063,6 +1077,7 @@ std::int64_t execute(const Bytecode& bytecode) {
     std::vector<std::string> text_heap;
     std::vector<std::vector<std::uint64_t>> object_heap;
     std::vector<PointerTarget> pointer_heap;
+    std::vector<HeapBlock> heap_blocks;
     std::uint64_t next_frame_id = 1;
     text_heap.emplace_back();
     frames.push_back(
@@ -1130,6 +1145,27 @@ std::int64_t execute(const Bytecode& bytecode) {
         return pointer_heap[static_cast<std::size_t>(handle - 1)];
     };
 
+    const auto heap_block = [&](const std::uint64_t handle) -> HeapBlock& {
+        if (handle == 0 || handle > heap_blocks.size()) {
+            throw std::runtime_error(
+                xorstr_("Concept VM heap block handle is invalid"));
+        }
+        auto& block = heap_blocks[static_cast<std::size_t>(handle - 1)];
+        if (block.freed) {
+            throw std::runtime_error(
+                xorstr_("Concept VM heap pointer refers to freed memory"));
+        }
+        if (!block.dynamic && block.frame_id != 0 &&
+            std::none_of(frames.begin(), frames.end(),
+                         [&](const Frame& frame) {
+                             return frame.id == block.frame_id;
+                         })) {
+            throw std::runtime_error(xorstr_(
+                "Concept VM pointer refers to an expired local array"));
+        }
+        return block;
+    };
+
     const auto local_frame = [&](const std::uint64_t id) -> Frame& {
         const auto frame = std::find_if(
             frames.rbegin(), frames.rend(),
@@ -1158,6 +1194,21 @@ std::int64_t execute(const Bytecode& bytecode) {
                     "Concept VM pointer field index is out of range"));
             }
             return fields[target.index];
+        }
+        if (target.kind == PointerTarget::Kind::heap_block) {
+            auto& block = heap_block(target.owner);
+            const auto size = heap_value_size(target.native_type);
+            if (target.index > block.bytes.size() ||
+                size > block.bytes.size() -
+                           static_cast<std::size_t>(target.index)) {
+                throw std::runtime_error(xorstr_(
+                    "Concept VM heap pointer is out of bounds"));
+            }
+            std::uint64_t value = 0;
+            std::memcpy(&value, block.bytes.data() + target.index, size);
+            return target.native_type == ValueType::boolean
+                       ? (value == 0 ? 0ULL : 1ULL)
+                       : value;
         }
         std::uint64_t value = 0;
         if (!read_native_value(target.owner, target.native_type, value)) {
@@ -1188,6 +1239,21 @@ std::int64_t execute(const Bytecode& bytecode) {
                     "Concept VM pointer field index is out of range"));
             }
             fields[target.index] = value;
+            return;
+        }
+        if (target.kind == PointerTarget::Kind::heap_block) {
+            auto& block = heap_block(target.owner);
+            const auto size = heap_value_size(target.native_type);
+            if (target.index > block.bytes.size() ||
+                size > block.bytes.size() -
+                           static_cast<std::size_t>(target.index)) {
+                throw std::runtime_error(xorstr_(
+                    "Concept VM heap pointer is out of bounds"));
+            }
+            const auto stored = target.native_type == ValueType::boolean
+                                    ? (value == 0 ? 0ULL : 1ULL)
+                                    : value;
+            std::memcpy(block.bytes.data() + target.index, &stored, size);
             return;
         }
         const auto stored = target.native_type == ValueType::boolean
@@ -1298,6 +1364,131 @@ std::int64_t execute(const Bytecode& bytecode) {
             }
             pointer_heap.push_back(
                 {PointerTarget::Kind::native_address, address, 0, type});
+            stack.push_back(pointer_heap.size());
+            break;
+        }
+        case Op::array_alloc: {
+            const auto type = read_type(bytecode.code, ip);
+            const auto count = read_u32(bytecode.code, ip);
+            const auto element_size = heap_value_size(type);
+            if (count >
+                std::numeric_limits<std::size_t>::max() / element_size) {
+                throw std::runtime_error(
+                    xorstr_("Concept VM array allocation is too large"));
+            }
+            heap_blocks.push_back(
+                {std::vector<std::uint8_t>(
+                     static_cast<std::size_t>(count) * element_size, 0),
+                 false, false, frames.back().id});
+            pointer_heap.push_back({PointerTarget::Kind::heap_block,
+                                    heap_blocks.size(), 0, type});
+            stack.push_back(pointer_heap.size());
+            break;
+        }
+        case Op::heap_alloc: {
+            const auto type = read_type(bytecode.code, ip);
+            const auto byte_count = pop();
+            if (byte_count > std::numeric_limits<std::size_t>::max()) {
+                throw std::runtime_error(
+                    xorstr_("Concept VM heap allocation is too large"));
+            }
+            heap_blocks.push_back(
+                {std::vector<std::uint8_t>(
+                     static_cast<std::size_t>(byte_count), 0),
+                 true, false, 0});
+            pointer_heap.push_back({PointerTarget::Kind::heap_block,
+                                    heap_blocks.size(), 0, type});
+            stack.push_back(pointer_heap.size());
+            break;
+        }
+        case Op::heap_free: {
+            const auto pointer = pop();
+            if (pointer == 0) {
+                stack.push_back(0);
+                break;
+            }
+            const auto target = pointer_target(pointer);
+            if (target.kind != PointerTarget::Kind::heap_block ||
+                target.index != 0) {
+                throw std::runtime_error(
+                    xorstr_("Concept VM free requires a malloc base pointer"));
+            }
+            if (target.owner == 0 || target.owner > heap_blocks.size()) {
+                throw std::runtime_error(
+                    xorstr_("Concept VM heap block handle is invalid"));
+            }
+            auto& block =
+                heap_blocks[static_cast<std::size_t>(target.owner - 1)];
+            if (!block.dynamic) {
+                throw std::runtime_error(
+                    xorstr_("Concept VM cannot free fixed array storage"));
+            }
+            if (block.freed) {
+                throw std::runtime_error(
+                    xorstr_("Concept VM detected a double free"));
+            }
+            block.bytes.clear();
+            block.freed = true;
+            stack.push_back(0);
+            break;
+        }
+        case Op::pointer_offset: {
+            const auto type = read_type(bytecode.code, ip);
+            const auto offset = std::bit_cast<std::int64_t>(pop());
+            const auto handle = pop();
+            const auto target = pointer_target(handle);
+            if (target.kind == PointerTarget::Kind::local ||
+                target.kind == PointerTarget::Kind::field) {
+                if (offset != 0) {
+                    throw std::runtime_error(xorstr_(
+                        "Concept VM cannot offset a local or field pointer"));
+                }
+                stack.push_back(handle);
+                break;
+            }
+            if (target.native_type != type) {
+                throw std::runtime_error(xorstr_(
+                    "Concept VM pointer arithmetic type mismatch"));
+            }
+            const auto element_size = heap_value_size(type);
+            const auto magnitude =
+                offset < 0 ? std::uint64_t{0} -
+                                 static_cast<std::uint64_t>(offset)
+                           : static_cast<std::uint64_t>(offset);
+            if (magnitude > std::numeric_limits<std::uint64_t>::max() /
+                                element_size) {
+                throw std::runtime_error(
+                    xorstr_("Concept VM pointer offset overflow"));
+            }
+            const auto byte_delta = magnitude * element_size;
+            auto adjusted = target;
+            auto& position =
+                adjusted.kind == PointerTarget::Kind::heap_block
+                    ? adjusted.index
+                    : adjusted.owner;
+            if (offset < 0) {
+                if (byte_delta > position) {
+                    throw std::runtime_error(
+                        xorstr_("Concept VM pointer offset is out of bounds"));
+                }
+                position -= byte_delta;
+            } else {
+                if (byte_delta >
+                    std::numeric_limits<std::uint64_t>::max() -
+                        position) {
+                    throw std::runtime_error(
+                        xorstr_("Concept VM pointer offset overflow"));
+                }
+                position += byte_delta;
+            }
+            if (adjusted.kind == PointerTarget::Kind::heap_block) {
+                auto& block = heap_block(adjusted.owner);
+                if (adjusted.index > block.bytes.size()) {
+                    throw std::runtime_error(
+                        xorstr_("Concept VM pointer offset is out of bounds"));
+                }
+            }
+            pointer_heap.push_back(adjusted);
             stack.push_back(pointer_heap.size());
             break;
         }

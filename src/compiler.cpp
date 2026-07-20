@@ -13,6 +13,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -45,6 +46,8 @@ enum class TokenKind {
     right_paren,
     left_brace,
     right_brace,
+    left_bracket,
+    right_bracket,
     semicolon,
     comma,
     dot,
@@ -322,6 +325,10 @@ public:
             return make_token(TokenKind::left_brace, start, 1, line, column);
         case '}':
             return make_token(TokenKind::right_brace, start, 1, line, column);
+        case '[':
+            return make_token(TokenKind::left_bracket, start, 1, line, column);
+        case ']':
+            return make_token(TokenKind::right_bracket, start, 1, line, column);
         case ';':
             return make_token(TokenKind::semicolon, start, 1, line, column);
         case ',':
@@ -450,6 +457,7 @@ struct Expr {
         call,
         cast,
         pointer_cast,
+        index,
         unary,
         binary,
     } kind{};
@@ -479,7 +487,9 @@ struct Stmt {
     Token token;
     std::string name;
     ValueType value_type{ValueType::i64};
+    bool template_type{};
     std::uint8_t pointer_depth{};
+    std::uint32_t array_length{};
     std::string class_name;
     std::unique_ptr<Expr> target;
     std::unique_ptr<Expr> expression;
@@ -491,6 +501,7 @@ struct Stmt {
 struct Function {
     Token name;
     ValueType return_type{ValueType::i64};
+    bool return_template_type{};
     std::uint8_t complexity{};
     std::string class_name;
     std::vector<std::unique_ptr<Stmt>> body;
@@ -499,11 +510,13 @@ struct Function {
 struct Field {
     Token name;
     ValueType type{ValueType::i64};
+    bool template_type{};
     std::uint8_t pointer_depth{};
 };
 
 struct Class {
     Token name;
+    std::string template_parameter;
     std::vector<Field> fields;
     std::vector<Function> methods;
 };
@@ -522,7 +535,8 @@ class Parser {
 public:
     Parser(const std::string_view source, const std::string_view filename)
         : lexer_(source, filename), current_(lexer_.next()),
-          next_(lexer_.next()) {}
+          next_(lexer_.next()), after_next_(lexer_.next()),
+          following_(lexer_.next()) {}
 
     ParsedModule parse_program() {
         ParsedModule module;
@@ -546,10 +560,15 @@ private:
     Lexer lexer_;
     Token current_;
     Token next_;
+    Token after_next_;
+    Token following_;
+    std::string active_template_parameter_;
 
     void advance() {
         current_ = next_;
-        next_ = lexer_.next();
+        next_ = after_next_;
+        after_next_ = following_;
+        following_ = lexer_.next();
     }
 
     bool match(const TokenKind kind) {
@@ -619,9 +638,16 @@ private:
         consume(TokenKind::right_paren,
                 "function parameters are not supported yet; expected ')'");
         consume(TokenKind::arrow, "expected '->'");
-        const auto return_type =
-            consume(TokenKind::type_kw, "expected function return type");
-        function.return_type = value_type_from_name(return_type.text);
+        if (!active_template_parameter_.empty() &&
+            current_.kind == TokenKind::identifier &&
+            current_.text == active_template_parameter_) {
+            function.return_template_type = true;
+            advance();
+        } else {
+            const auto return_type =
+                consume(TokenKind::type_kw, "expected function return type");
+            function.return_type = value_type_from_name(return_type.text);
+        }
         function.body = parse_block_contents();
         return function;
     }
@@ -631,10 +657,24 @@ private:
         Class declaration;
         declaration.name =
             consume(TokenKind::identifier, "expected class name");
+        if (match(TokenKind::less)) {
+            declaration.template_parameter =
+                consume(TokenKind::identifier,
+                        "expected generic type parameter")
+                    .text;
+            consume(TokenKind::greater,
+                    "expected '>' after generic type parameter");
+        }
+        const auto previous_template_parameter = active_template_parameter_;
+        active_template_parameter_ = declaration.template_parameter;
         consume(TokenKind::left_brace, "expected '{' after class name");
         while (current_.kind != TokenKind::right_brace &&
                current_.kind != TokenKind::end) {
-            if (current_.kind == TokenKind::type_kw) {
+            const bool is_template_type =
+                !active_template_parameter_.empty() &&
+                current_.kind == TokenKind::identifier &&
+                current_.text == active_template_parameter_;
+            if (current_.kind == TokenKind::type_kw || is_template_type) {
                 const auto type = current_;
                 advance();
                 std::uint8_t pointer_depth = 0;
@@ -649,13 +689,17 @@ private:
                     consume(TokenKind::identifier, "expected field name");
                 consume(TokenKind::semicolon, "expected ';' after field");
                 declaration.fields.push_back(
-                    {name, value_type_from_name(type.text), pointer_depth});
+                    {name,
+                     is_template_type ? ValueType::u64
+                                      : value_type_from_name(type.text),
+                     is_template_type, pointer_depth});
                 continue;
             }
             declaration.methods.push_back(
                 parse_function(declaration.name.text));
         }
         consume(TokenKind::right_brace, "expected '}' after class body");
+        active_template_parameter_ = previous_template_parameter;
         return declaration;
     }
 
@@ -689,17 +733,36 @@ private:
         if (current_.kind == TokenKind::type_kw ||
             (current_.kind == TokenKind::identifier &&
              (next_.kind == TokenKind::identifier ||
-              next_.kind == TokenKind::star))) {
+              next_.kind == TokenKind::star ||
+              (next_.kind == TokenKind::less &&
+               after_next_.kind == TokenKind::type_kw &&
+               following_.kind == TokenKind::greater)))) {
             auto statement = std::make_unique<Stmt>();
             statement->kind = Stmt::Kind::variable;
             statement->token = current_;
             if (current_.kind == TokenKind::type_kw) {
                 statement->value_type = value_type_from_name(current_.text);
+                advance();
+            } else if (!active_template_parameter_.empty() &&
+                       current_.text == active_template_parameter_) {
+                statement->template_type = true;
+                advance();
             } else {
                 statement->value_type = ValueType::u64;
                 statement->class_name = current_.text;
+                advance();
+                if (match(TokenKind::less)) {
+                    const auto argument = consume(
+                        TokenKind::type_kw,
+                        "expected a core generic type argument");
+                    statement->class_name +=
+                        "<" + std::string(value_type_name(
+                                  value_type_from_name(argument.text))) +
+                        ">";
+                    consume(TokenKind::greater,
+                            "expected '>' after generic type argument");
+                }
             }
-            advance();
             while (match(TokenKind::star)) {
                 if (statement->pointer_depth ==
                     std::numeric_limits<std::uint8_t>::max()) {
@@ -711,7 +774,35 @@ private:
             const auto name =
                 consume(TokenKind::identifier, "expected variable name");
             statement->name = name.text;
+            if (match(TokenKind::left_bracket)) {
+                const auto length = consume(
+                    TokenKind::integer,
+                    "expected a constant array length");
+                const bool hexadecimal =
+                    length.text.size() > 2 && length.text[0] == '0' &&
+                    (length.text[1] == 'x' || length.text[1] == 'X');
+                const auto* begin =
+                    length.text.data() + (hexadecimal ? 2 : 0);
+                const auto* end = length.text.data() + length.text.size();
+                std::uint64_t parsed = 0;
+                const auto result = std::from_chars(
+                    begin, end, parsed, hexadecimal ? 16 : 10);
+                if (result.ec != std::errc{} || result.ptr != end ||
+                    parsed == 0 ||
+                    parsed > std::numeric_limits<std::uint32_t>::max()) {
+                    fail(length,
+                         "array length must be between 1 and 4294967295");
+                }
+                statement->array_length =
+                    static_cast<std::uint32_t>(parsed);
+                consume(TokenKind::right_bracket,
+                        "expected ']' after array length");
+            }
             if (match(TokenKind::assign)) {
+                if (statement->array_length != 0) {
+                    fail(statement->token,
+                         "array initializers are not supported yet");
+                }
                 statement->expression = parse_expression();
             }
             consume(TokenKind::semicolon,
@@ -747,8 +838,9 @@ private:
         auto first_expression = parse_expression();
         if (match(TokenKind::assign)) {
             const bool indirect =
-                first_expression->kind == Expr::Kind::unary &&
-                first_expression->op == TokenKind::star;
+                (first_expression->kind == Expr::Kind::unary &&
+                 first_expression->op == TokenKind::star) ||
+                first_expression->kind == Expr::Kind::index;
             if (first_expression->kind != Expr::Kind::variable &&
                 first_expression->kind != Expr::Kind::member && !indirect) {
                 fail(first_expression->token, "invalid assignment target");
@@ -828,7 +920,23 @@ private:
 
     std::unique_ptr<Expr> parse_postfix() {
         auto expression = parse_primary();
-        while (match(TokenKind::dot)) {
+        for (;;) {
+            if (current_.kind == TokenKind::left_bracket) {
+                const auto bracket = current_;
+                advance();
+                auto access = std::make_unique<Expr>();
+                access->kind = Expr::Kind::index;
+                access->token = bracket;
+                access->left = std::move(expression);
+                access->right = parse_expression();
+                consume(TokenKind::right_bracket,
+                        "expected ']' after array index");
+                expression = std::move(access);
+                continue;
+            }
+            if (!match(TokenKind::dot)) {
+                break;
+            }
             const auto member =
                 consume(TokenKind::identifier, "expected member name");
             auto access = std::make_unique<Expr>();
@@ -941,6 +1049,36 @@ private:
             expression->right = parse_expression();
             consume(TokenKind::right_paren,
                     "expected ')' after ptr_cast address");
+            return expression;
+        }
+        if (current_.kind == TokenKind::identifier &&
+            next_.kind == TokenKind::less &&
+            after_next_.kind == TokenKind::type_kw &&
+            following_.kind == TokenKind::greater) {
+            auto expression = std::make_unique<Expr>();
+            expression->kind = Expr::Kind::call;
+            expression->token = current_;
+            expression->name = current_.text;
+            advance();
+            consume(TokenKind::less, "expected '<' after generic class name");
+            const auto argument = consume(
+                TokenKind::type_kw,
+                "expected a core generic type argument");
+            expression->name +=
+                "<" + std::string(value_type_name(
+                          value_type_from_name(argument.text))) +
+                ">";
+            consume(TokenKind::greater,
+                    "expected '>' after generic type argument");
+            consume(TokenKind::left_paren,
+                    "expected '(' after generic class type");
+            if (current_.kind != TokenKind::right_paren) {
+                do {
+                    expression->arguments.push_back(parse_expression());
+                } while (match(TokenKind::comma));
+            }
+            consume(TokenKind::right_paren,
+                    "expected ')' after constructor arguments");
             return expression;
         }
         if (current_.kind == TokenKind::identifier) {
@@ -1197,6 +1335,7 @@ struct LocalInfo {
     ValueType type{ValueType::i64};
     std::string class_name;
     std::uint8_t pointer_depth{};
+    std::uint32_t array_length{};
 };
 
 struct FieldInfo {
@@ -1216,6 +1355,12 @@ struct ClassInfo {
     std::unordered_map<std::string, FieldInfo> fields;
     std::unordered_map<std::string, std::string> methods;
     bool native_socket{};
+};
+
+struct GenericSpecialization {
+    const Class* declaration{};
+    std::string name;
+    ValueType argument{ValueType::i64};
 };
 
 struct CallPatch {
@@ -1240,8 +1385,17 @@ public:
             compile_function(function);
         }
         for (const auto& declaration : classes_) {
+            if (!declaration.template_parameter.empty()) {
+                continue;
+            }
             for (const auto& method : declaration.methods) {
                 compile_function(method);
+            }
+        }
+        for (const auto& specialization : generic_specializations_) {
+            for (const auto& method : specialization.declaration->methods) {
+                compile_function(method, specialization.name,
+                                 specialization.argument);
             }
         }
         resolve_calls();
@@ -1274,11 +1428,15 @@ private:
     std::vector<std::uint8_t> code_;
     std::unordered_map<std::string, FunctionInfo> function_info_;
     std::unordered_map<std::string, ClassInfo> class_info_;
+    std::unordered_map<std::string, const Class*> class_templates_;
+    std::vector<GenericSpecialization> generic_specializations_;
+    std::unordered_set<std::string> generic_specialization_names_;
     std::unordered_map<std::string, LocalInfo> locals_;
     std::vector<CallPatch> call_patches_;
     std::vector<std::string> strings_;
     ValueType current_return_type_{ValueType::i64};
     std::string current_class_;
+    std::optional<ValueType> current_template_type_;
     std::uint8_t current_complexity_{};
     std::uint32_t obfuscation_credit_{};
     std::uint64_t obfuscation_state_{fresh_opcode_seed()};
@@ -1297,6 +1455,114 @@ private:
                    : function.class_name + "." + function.name.text;
     }
 
+    static std::optional<std::pair<std::string, ValueType>>
+    generic_application(const std::string& name) {
+        const auto open = name.find('<');
+        if (open == std::string::npos || name.empty() || name.back() != '>' ||
+            open == 0 || open + 2 >= name.size()) {
+            return std::nullopt;
+        }
+        const auto argument = std::string_view(name).substr(
+            open + 1, name.size() - open - 2);
+        if (!is_type_name(argument)) {
+            return std::nullopt;
+        }
+        return std::pair{name.substr(0, open),
+                         value_type_from_name(argument)};
+    }
+
+    void register_concrete_class(const Class& declaration,
+                                 const std::string& name,
+                                 const std::optional<ValueType> argument) {
+        if (declaration.fields.size() >
+            std::numeric_limits<std::uint16_t>::max()) {
+            fail(declaration.name, "class has too many fields");
+        }
+        ClassInfo info;
+        info.field_count =
+            static_cast<std::uint16_t>(declaration.fields.size());
+        for (std::size_t index = 0; index < declaration.fields.size();
+             ++index) {
+            const auto& field = declaration.fields[index];
+            if (field.template_type && !argument) {
+                fail(field.name,
+                     "generic field type requires a specialization");
+            }
+            const auto type = field.template_type ? *argument : field.type;
+            if (!info.fields
+                     .emplace(field.name.text,
+                              FieldInfo{static_cast<std::uint16_t>(index),
+                                        type, field.pointer_depth})
+                     .second) {
+                fail(field.name,
+                     "duplicate field '" + field.name.text + "'");
+            }
+        }
+        for (const auto& method : declaration.methods) {
+            if (!info.methods
+                     .emplace(method.name.text,
+                              name + "." + method.name.text)
+                     .second) {
+                fail(method.name,
+                     "duplicate method '" + method.name.text + "'");
+            }
+        }
+        if (!class_info_.emplace(name, std::move(info)).second) {
+            fail(declaration.name, "duplicate class '" + name + "'");
+        }
+    }
+
+    void collect_generic_expression(const Expr& expression) {
+        if (expression.kind == Expr::Kind::call && !expression.left) {
+            register_generic_use(expression.name, expression.token);
+        }
+        if (expression.left) {
+            collect_generic_expression(*expression.left);
+        }
+        if (expression.right) {
+            collect_generic_expression(*expression.right);
+        }
+        for (const auto& argument : expression.arguments) {
+            collect_generic_expression(*argument);
+        }
+    }
+
+    void collect_generic_statement(const Stmt& statement) {
+        register_generic_use(statement.class_name, statement.token);
+        if (statement.target) {
+            collect_generic_expression(*statement.target);
+        }
+        if (statement.expression) {
+            collect_generic_expression(*statement.expression);
+        }
+        if (statement.first) {
+            collect_generic_statement(*statement.first);
+        }
+        if (statement.second) {
+            collect_generic_statement(*statement.second);
+        }
+        for (const auto& child : statement.statements) {
+            collect_generic_statement(*child);
+        }
+    }
+
+    void register_generic_use(const std::string& name, const Token& token) {
+        const auto application = generic_application(name);
+        if (!application) {
+            return;
+        }
+        if (!generic_specialization_names_.insert(name).second) {
+            return;
+        }
+        const auto declaration = class_templates_.find(application->first);
+        if (declaration == class_templates_.end()) {
+            fail(token, "unknown generic class '" + application->first +
+                            "'");
+        }
+        generic_specializations_.push_back(
+            {declaration->second, name, application->second});
+    }
+
     void register_classes() {
         if (has_std_) {
             ClassInfo socket;
@@ -1309,37 +1575,38 @@ private:
                 fail(declaration.name,
                      "class name '" + name + "' is reserved by the VM");
             }
-            if (declaration.fields.size() >
-                std::numeric_limits<std::uint16_t>::max()) {
-                fail(declaration.name, "class has too many fields");
-            }
-            ClassInfo info;
-            info.field_count =
-                static_cast<std::uint16_t>(declaration.fields.size());
-            for (std::size_t index = 0; index < declaration.fields.size();
-                 ++index) {
-                const auto& field = declaration.fields[index];
-                if (!info.fields
-                         .emplace(field.name.text,
-                                  FieldInfo{static_cast<std::uint16_t>(index),
-                                            field.type,
-                                            field.pointer_depth})
-                         .second) {
-                    fail(field.name,
-                         "duplicate field '" + field.name.text + "'");
+            if (!declaration.template_parameter.empty()) {
+                if (class_info_.contains(name) ||
+                    !class_templates_.emplace(name, &declaration).second) {
+                    fail(declaration.name,
+                         "duplicate class '" + name + "'");
                 }
+            } else {
+                if (class_templates_.contains(name)) {
+                    fail(declaration.name,
+                         "duplicate class '" + name + "'");
+                }
+                register_concrete_class(declaration, name, std::nullopt);
             }
+        }
+
+        const auto collect_function = [&](const Function& function) {
+            for (const auto& statement : function.body) {
+                collect_generic_statement(*statement);
+            }
+        };
+        for (const auto& function : functions_) {
+            collect_function(function);
+        }
+        for (const auto& declaration : classes_) {
             for (const auto& method : declaration.methods) {
-                if (!info.methods
-                         .emplace(method.name.text, function_key(method))
-                         .second) {
-                    fail(method.name,
-                         "duplicate method '" + method.name.text + "'");
-                }
+                collect_function(method);
             }
-            if (!class_info_.emplace(name, std::move(info)).second) {
-                fail(declaration.name, "duplicate class '" + name + "'");
-            }
+        }
+        for (const auto& specialization : generic_specializations_) {
+            register_concrete_class(*specialization.declaration,
+                                    specialization.name,
+                                    specialization.argument);
         }
     }
 
@@ -1362,19 +1629,49 @@ private:
             }
         }
         for (const auto& declaration : classes_) {
+            if (!declaration.template_parameter.empty()) {
+                continue;
+            }
             for (const auto& method : declaration.methods) {
                 const auto key = function_key(method);
                 function_info_.emplace(
                     key, FunctionInfo{0, 0, method.return_type});
             }
         }
+        for (const auto& specialization : generic_specializations_) {
+            for (const auto& method : specialization.declaration->methods) {
+                const auto key =
+                    specialization.name + "." + method.name.text;
+                const auto return_type = method.return_template_type
+                                             ? specialization.argument
+                                             : method.return_type;
+                function_info_.emplace(
+                    key, FunctionInfo{0, 0, return_type});
+            }
+        }
     }
 
-    void compile_function(const Function& function) {
-        auto& info = function_info_.at(function_key(function));
+    void compile_function(
+        const Function& function,
+        const std::string_view class_name_override = {},
+        const std::optional<ValueType> template_type = std::nullopt) {
+        const auto class_name = class_name_override.empty()
+                                    ? function.class_name
+                                    : std::string(class_name_override);
+        const auto key = class_name.empty()
+                             ? function.name.text
+                             : class_name + "." + function.name.text;
+        auto& info = function_info_.at(key);
         info.entry = checked_offset();
-        current_return_type_ = function.return_type;
-        current_class_ = function.class_name;
+        if (function.return_template_type && !template_type) {
+            fail(function.name,
+                 "generic return type requires a specialization");
+        }
+        current_template_type_ = template_type;
+        current_return_type_ = function.return_template_type
+                                   ? *template_type
+                                   : function.return_type;
+        current_class_ = class_name;
         current_complexity_ = function.complexity;
         obfuscation_credit_ = 0;
         locals_.clear();
@@ -1390,7 +1687,7 @@ private:
         }
 
         emit_obfuscation();
-        emit_default_value(function.return_type);
+        emit_default_value(current_return_type_);
         emit(Op::return_value);
         info.locals = static_cast<std::uint32_t>(locals_.size());
     }
@@ -1411,19 +1708,47 @@ private:
             if (locals_.size() >= std::numeric_limits<std::uint16_t>::max()) {
                 fail(statement.token, "too many local variables");
             }
+            if (statement.template_type && !current_template_type_) {
+                fail(statement.token,
+                     "generic local type requires a specialization");
+            }
+            const auto value_type = statement.template_type
+                                        ? *current_template_type_
+                                        : statement.value_type;
             const auto index = static_cast<std::uint16_t>(locals_.size());
             locals_.emplace(statement.name,
-                            LocalInfo{index, statement.value_type,
+                            LocalInfo{index, value_type,
                                       statement.class_name,
-                                      statement.pointer_depth});
-            if (statement.pointer_depth != 0) {
+                                      statement.pointer_depth,
+                                      statement.array_length});
+            if (statement.array_length != 0) {
+                if (!statement.class_name.empty() &&
+                    statement.pointer_depth == 0) {
+                    fail(statement.token,
+                         "arrays of class objects are not supported yet");
+                }
+                if (!statement.class_name.empty()) {
+                    lookup_class(statement.token, statement.class_name);
+                }
+                if (statement.pointer_depth ==
+                    std::numeric_limits<std::uint8_t>::max()) {
+                    fail(statement.token,
+                         "array element pointer type has too many "
+                         "indirections");
+                }
+                emit(Op::array_alloc);
+                emit_type(statement.pointer_depth == 0
+                              ? value_type
+                              : ValueType::u64);
+                emit_u32(statement.array_length);
+            } else if (statement.pointer_depth != 0) {
                 if (!statement.class_name.empty()) {
                     lookup_class(statement.token, statement.class_name);
                 }
                 if (statement.expression) {
                     compile_pointer_expression_as(
                         *statement.expression,
-                        SemanticType{statement.value_type,
+                        SemanticType{value_type,
                                      statement.class_name,
                                      statement.pointer_depth});
                 } else {
@@ -1440,9 +1765,9 @@ private:
                 }
             } else if (statement.expression) {
                 compile_expression_as(*statement.expression,
-                                      statement.value_type);
+                                      value_type);
             } else {
-                emit_default_value(statement.value_type);
+                emit_default_value(value_type);
             }
             emit(Op::store);
             emit_u16(index);
@@ -1450,6 +1775,9 @@ private:
         }
         case Stmt::Kind::assign: {
             const auto& local = lookup_local(statement.token, statement.name);
+            if (local.array_length != 0) {
+                fail(statement.token, "cannot assign to an array");
+            }
             if (local.pointer_depth != 0) {
                 compile_pointer_expression_as(
                     *statement.expression,
@@ -1487,15 +1815,22 @@ private:
             return;
         }
         case Stmt::Kind::indirect_assign: {
-            const auto pointer_type =
-                semantic_type(*statement.target->right);
-            if (pointer_type.pointer_depth == 0) {
-                fail(statement.target->token,
-                     "indirect assignment requires a pointer");
+            SemanticType target_type;
+            if (statement.target->kind == Expr::Kind::index) {
+                target_type = semantic_type(*statement.target);
+                compile_index_address(*statement.target);
+            } else {
+                const auto pointer_type =
+                    semantic_type(*statement.target->right);
+                if (pointer_type.pointer_depth == 0) {
+                    fail(statement.target->token,
+                         "indirect assignment requires a pointer");
+                }
+                static_cast<void>(
+                    compile_expression(*statement.target->right));
+                target_type = pointer_type;
+                --target_type.pointer_depth;
             }
-            static_cast<void>(compile_expression(*statement.target->right));
-            auto target_type = pointer_type;
-            --target_type.pointer_depth;
             compile_semantic_expression_as(*statement.expression,
                                            target_type);
             emit(Op::store_indirect);
@@ -1554,7 +1889,17 @@ private:
             const auto& local = lookup_local(expression.token, expression.name);
             emit(Op::load);
             emit_u16(local.index);
-            return local.pointer_depth == 0 ? local.type : ValueType::u64;
+            return local.pointer_depth == 0 && local.array_length == 0
+                       ? local.type
+                       : ValueType::u64;
+        }
+        case Expr::Kind::index: {
+            const auto result = semantic_type(expression);
+            compile_index_address(expression);
+            emit(Op::load_indirect);
+            return result.pointer_depth != 0 || !result.class_name.empty()
+                       ? ValueType::u64
+                       : result.type;
         }
         case Expr::Kind::member: {
             const auto class_name = expression_class(*expression.left);
@@ -1677,6 +2022,33 @@ private:
             return operand_type;
         }
         case Expr::Kind::binary: {
+            const auto left_semantic = semantic_type(*expression.left);
+            const auto right_semantic = semantic_type(*expression.right);
+            if (left_semantic.pointer_depth != 0 ||
+                right_semantic.pointer_depth != 0) {
+                static_cast<void>(semantic_type(expression));
+                const bool pointer_on_left =
+                    left_semantic.pointer_depth != 0;
+                const auto& pointer_expression =
+                    pointer_on_left ? *expression.left : *expression.right;
+                const auto& offset_expression =
+                    pointer_on_left ? *expression.right : *expression.left;
+                auto pointer_type = pointer_on_left ? left_semantic
+                                                    : right_semantic;
+                static_cast<void>(compile_expression(pointer_expression));
+                compile_expression_as(offset_expression, ValueType::i64);
+                if (expression.op == TokenKind::minus) {
+                    emit(Op::negate);
+                    emit_type(ValueType::i64);
+                }
+                --pointer_type.pointer_depth;
+                emit(Op::pointer_offset);
+                emit_type(pointer_type.pointer_depth != 0 ||
+                                  !pointer_type.class_name.empty()
+                              ? ValueType::u64
+                              : pointer_type.type);
+                return ValueType::u64;
+            }
             const auto result_type = expression_type(expression);
             const auto left_type = expression_type(*expression.left);
             const auto right_type = expression_type(*expression.right);
@@ -1716,7 +2088,25 @@ private:
         case Expr::Kind::variable: {
             const auto& local =
                 lookup_local(expression.token, expression.name);
-            return {local.type, local.class_name, local.pointer_depth};
+            return {local.type, local.class_name,
+                    static_cast<std::uint8_t>(
+                        local.pointer_depth +
+                        (local.array_length == 0 ? 0 : 1))};
+        }
+        case Expr::Kind::index: {
+            auto pointer = semantic_type(*expression.left);
+            if (pointer.pointer_depth == 0) {
+                fail(expression.token,
+                     "index operator requires an array or pointer");
+            }
+            const auto index = semantic_type(*expression.right);
+            if (index.pointer_depth != 0 || !index.class_name.empty() ||
+                !is_integral(index.type)) {
+                fail(expression.right->token,
+                     "array index must be an integral value");
+            }
+            --pointer.pointer_depth;
+            return pointer;
         }
         case Expr::Kind::member: {
             const auto class_name = expression_class(*expression.left);
@@ -1758,6 +2148,10 @@ private:
                 return {ValueType::u64, expression.name, 0};
             }
             if (is_builtin_name(expression.name)) {
+                if (expression.name == "malloc") {
+                    static_cast<void>(builtin_type(expression));
+                    return {ValueType::u8, {}, 1};
+                }
                 return {builtin_type(expression), {}, 0};
             }
             if (!expression.arguments.empty()) {
@@ -1797,6 +2191,7 @@ private:
                 const bool addressable =
                     expression.right->kind == Expr::Kind::variable ||
                     expression.right->kind == Expr::Kind::member ||
+                    expression.right->kind == Expr::Kind::index ||
                     (expression.right->kind == Expr::Kind::unary &&
                      expression.right->op == TokenKind::star);
                 if (!addressable) {
@@ -1841,8 +2236,27 @@ private:
             const auto left = semantic_type(*expression.left);
             const auto right = semantic_type(*expression.right);
             if (left.pointer_depth != 0 || right.pointer_depth != 0) {
-                fail(expression.token,
-                     "pointers cannot be used with binary operators");
+                if (left.pointer_depth != 0 && right.pointer_depth != 0) {
+                    fail(expression.token,
+                         "two pointers cannot be used with a binary operator");
+                }
+                const bool pointer_on_left = left.pointer_depth != 0;
+                const auto& pointer = pointer_on_left ? left : right;
+                const auto& offset = pointer_on_left ? right : left;
+                if (expression.op != TokenKind::plus &&
+                    !(pointer_on_left &&
+                      expression.op == TokenKind::minus)) {
+                    fail(expression.token,
+                         "pointer arithmetic supports only pointer + integer, "
+                         "integer + pointer, and pointer - integer");
+                }
+                if (!offset.class_name.empty() ||
+                    offset.pointer_depth != 0 ||
+                    !is_integral(offset.type)) {
+                    fail(expression.token,
+                         "pointer offset must be an integral value");
+                }
+                return pointer;
             }
             if (!left.class_name.empty() || !right.class_name.empty()) {
                 fail(expression.token,
@@ -1867,6 +2281,11 @@ private:
 
     void compile_pointer_expression_as(const Expr& expression,
                                        const SemanticType& expected) {
+        if (expression.kind == Expr::Kind::call && !expression.left &&
+            expression.name == "malloc") {
+            compile_malloc(expression, expected);
+            return;
+        }
         const auto actual = semantic_type(expression);
         if (actual.pointer_depth == 0) {
             fail(expression.token, "expected a pointer value");
@@ -1891,6 +2310,10 @@ private:
     }
 
     void compile_address(const Expr& expression) {
+        if (expression.kind == Expr::Kind::index) {
+            compile_index_address(expression);
+            return;
+        }
         if (expression.kind == Expr::Kind::variable) {
             const auto& local =
                 lookup_local(expression.token, expression.name);
@@ -1920,10 +2343,23 @@ private:
              "address-of operator requires a variable, field, or dereference");
     }
 
+    void compile_index_address(const Expr& expression) {
+        auto pointer = semantic_type(*expression.left);
+        static_cast<void>(semantic_type(expression));
+        static_cast<void>(compile_expression(*expression.left));
+        compile_expression_as(*expression.right, ValueType::i64);
+        --pointer.pointer_depth;
+        emit(Op::pointer_offset);
+        emit_type(pointer.pointer_depth != 0 || !pointer.class_name.empty()
+                      ? ValueType::u64
+                      : pointer.type);
+    }
+
     [[nodiscard]] bool is_builtin_name(const std::string_view name) const {
         return name == "input" || name == "input_text" ||
                name == "input_i64" || name == "input_f64" ||
-               name == "print" || name == "println";
+               name == "print" || name == "println" ||
+               name == "malloc" || name == "free";
     }
 
     [[nodiscard]] ValueType builtin_type(const Expr& expression) const {
@@ -1948,6 +2384,25 @@ private:
         if (expression.name == "input_f64") {
             require_arguments(0);
             return ValueType::f64;
+        }
+        if (expression.name == "malloc") {
+            require_arguments(1);
+            const auto size = semantic_type(*expression.arguments.front());
+            if (size.pointer_depth != 0 || !size.class_name.empty() ||
+                !is_integral(size.type)) {
+                fail(expression.token,
+                     "malloc size must be an integral value");
+            }
+            return ValueType::u64;
+        }
+        if (expression.name == "free") {
+            require_arguments(1);
+            const auto pointer =
+                semantic_type(*expression.arguments.front());
+            if (pointer.pointer_depth == 0) {
+                fail(expression.token, "free expects a pointer");
+            }
+            return ValueType::i64;
         }
         if (expression.name == "print" || expression.name == "println") {
             require_arguments(1);
@@ -1980,11 +2435,41 @@ private:
             emit(Op::input_f64);
             return result_type;
         }
+        if (expression.name == "malloc") {
+            compile_malloc(expression, SemanticType{ValueType::u8, {}, 1});
+            return ValueType::u64;
+        }
+        if (expression.name == "free") {
+            static_cast<void>(
+                compile_expression(*expression.arguments.front()));
+            emit(Op::heap_free);
+            return result_type;
+        }
         const auto argument_type =
             compile_expression(*expression.arguments.front());
         emit(expression.name == "print" ? Op::print : Op::println);
         emit_type(argument_type);
         return result_type;
+    }
+
+    void compile_malloc(const Expr& expression,
+                        SemanticType pointer_type) {
+        static_cast<void>(builtin_type(expression));
+        if (pointer_type.pointer_depth == 0) {
+            fail(expression.token, "malloc requires a pointer destination");
+        }
+        compile_expression_as(*expression.arguments.front(), ValueType::u64);
+        --pointer_type.pointer_depth;
+        if (!pointer_type.class_name.empty() &&
+            pointer_type.pointer_depth == 0) {
+            fail(expression.token,
+                 "malloc cannot construct a class object");
+        }
+        emit(Op::heap_alloc);
+        emit_type(pointer_type.pointer_depth != 0 ||
+                          !pointer_type.class_name.empty()
+                      ? ValueType::u64
+                      : pointer_type.type);
     }
 
     [[nodiscard]] ValueType expression_type(const Expr& expression) const {
