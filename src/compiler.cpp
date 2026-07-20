@@ -34,6 +34,7 @@ enum class TokenKind {
     while_kw,
     true_kw,
     false_kw,
+    at,
     left_paren,
     right_paren,
     left_brace,
@@ -273,6 +274,8 @@ public:
         }
 
         switch (character) {
+        case '@':
+            return make_token(TokenKind::at, start, 1, line, column);
         case '(':
             return make_token(TokenKind::left_paren, start, 1, line, column);
         case ')':
@@ -431,6 +434,7 @@ struct Stmt {
 struct Function {
     Token name;
     ValueType return_type{ValueType::i64};
+    std::uint8_t complexity{};
     std::vector<std::unique_ptr<Stmt>> body;
 };
 
@@ -488,8 +492,40 @@ private:
     }
 
     Function parse_function() {
-        consume(TokenKind::fn_kw, "expected 'fn'");
         Function function;
+        bool has_complexity = false;
+        while (match(TokenKind::at)) {
+            const auto decorator =
+                consume(TokenKind::identifier, "expected decorator name");
+            if (decorator.text != "complexity" &&
+                decorator.text != "complexty") {
+                fail(decorator, "unknown decorator '@" +
+                                    std::string(decorator.text) + "'");
+            }
+            if (has_complexity) {
+                fail(decorator, "duplicate complexity decorator");
+            }
+            has_complexity = true;
+            consume(TokenKind::left_paren,
+                    "expected '(' after complexity decorator");
+            const auto value = consume(
+                TokenKind::integer,
+                "expected an integer from 0 to 100 for complexity");
+            std::uint32_t parsed = 0;
+            const auto result = std::from_chars(
+                value.text.data(), value.text.data() + value.text.size(),
+                parsed);
+            if (result.ec != std::errc{} ||
+                result.ptr != value.text.data() + value.text.size() ||
+                parsed > 100) {
+                fail(value, "complexity must be between 0 and 100");
+            }
+            function.complexity = static_cast<std::uint8_t>(parsed);
+            consume(TokenKind::right_paren,
+                    "expected ')' after complexity value");
+        }
+
+        consume(TokenKind::fn_kw, "expected 'fn'");
         function.name =
             consume(TokenKind::identifier, "expected function name");
         consume(TokenKind::left_paren, "expected '('");
@@ -860,6 +896,9 @@ private:
     std::vector<CallPatch> call_patches_;
     std::vector<std::string> strings_;
     ValueType current_return_type_{ValueType::i64};
+    std::uint8_t current_complexity_{};
+    std::uint32_t obfuscation_credit_{};
+    std::uint64_t obfuscation_state_{fresh_opcode_seed()};
 
     [[noreturn]] void fail(const Token& token,
                            const std::string& message) const {
@@ -888,17 +927,24 @@ private:
         auto& info = function_info_.at(std::string(function.name.text));
         info.entry = checked_offset();
         current_return_type_ = function.return_type;
+        current_complexity_ = function.complexity;
+        obfuscation_credit_ = 0;
         locals_.clear();
+        if (current_complexity_ != 0) {
+            emit_obfuscation_layer();
+        }
         for (const auto& statement : function.body) {
             compile_statement(*statement);
         }
 
+        emit_obfuscation();
         emit_default_value(function.return_type);
         emit(Op::return_value);
         info.locals = static_cast<std::uint32_t>(locals_.size());
     }
 
     void compile_statement(const Stmt& statement) {
+        emit_obfuscation();
         switch (statement.kind) {
         case Stmt::Kind::block:
             for (const auto& child : statement.statements) {
@@ -1332,6 +1378,62 @@ private:
         }
         emit(Op::push_bits);
         emit_u64(0);
+    }
+
+    std::uint64_t next_obfuscation_random() {
+        obfuscation_state_ += 0x9e3779b97f4a7c15ULL;
+        return mix_seed(obfuscation_state_);
+    }
+
+    void emit_obfuscation() {
+        obfuscation_credit_ += current_complexity_;
+        while (obfuscation_credit_ >= 25) {
+            emit_obfuscation_layer();
+            obfuscation_credit_ -= 25;
+        }
+    }
+
+    void emit_obfuscation_layer() {
+        emit(Op::jump);
+        const auto predicate_target = reserve_u32();
+
+        const auto dead_target = checked_offset();
+        emit(Op::push_bits);
+        emit_u64(next_obfuscation_random());
+        emit(Op::push_bits);
+        emit_u64(next_obfuscation_random());
+        emit(Op::multiply);
+        emit_type(ValueType::u64);
+        emit(Op::pop);
+        emit(Op::push_bits);
+        emit_u64(next_obfuscation_random());
+        emit(Op::negate);
+        emit_type(ValueType::i64);
+        emit(Op::pop);
+        emit(Op::jump);
+        const auto dead_exit = reserve_u32();
+
+        patch_u32(predicate_target, checked_offset());
+        const auto left = next_obfuscation_random();
+        const auto right = next_obfuscation_random();
+        emit(Op::push_bits);
+        emit_u64(left);
+        emit(Op::push_bits);
+        emit_u64(right);
+        emit(Op::add);
+        emit_type(ValueType::u64);
+        emit(Op::push_bits);
+        emit_u64(left + right);
+        emit(Op::equal);
+        emit_type(ValueType::u64);
+        emit(Op::jump_if_false);
+        emit_u32(dead_target);
+        emit(Op::jump);
+        const auto live_exit = reserve_u32();
+
+        const auto live_target = checked_offset();
+        patch_u32(dead_exit, live_target);
+        patch_u32(live_exit, live_target);
     }
 
     std::uint32_t add_string(const std::string& value) {

@@ -47,6 +47,7 @@ Generated programs use four cooperative VM contexts by default. Select between
 ## Current syntax
 
 ```c
+@complexity(25)
 fn calculate() -> double {
     float factor = 1.5;
     return f64(factor) * 28.0;
@@ -83,6 +84,13 @@ The bootstrap subset supports:
   `input_f64()` for parsed numeric lines;
 - `print(value)` and `println(value)` for every core value type;
 - `//` line comments.
+
+Functions can use `@complexity(level)`, where `level` is from `0` to `100`.
+Level `0` emits straight bytecode. Higher levels add progressively more opaque
+branches, shuffled control-flow paths, and unreachable stack-balanced junk
+instructions to that function. `@complexty(level)` is also accepted as an
+alias for compatibility with the original spelling. The calculator example
+uses level `100`.
 
 Strings currently support storage, function returns, printing, and `==`/`!=`.
 Concatenation, indexing, and conversion between strings and numeric values are
@@ -121,6 +129,10 @@ code regions while sharing the operand stack, call frames, locals, and string
 heap. Compiling identical source twice therefore produces different bytecode.
 This is an obfuscation layer, not encryption: the executable necessarily
 contains enough information for its VMs to recover their mappings.
+
+Complexity decorators are also an obfuscation boundary rather than a security
+guarantee. They increase reverse-engineering cost and executable size, but a
+determined analyst can still recover program behavior.
 
 Self-hosting is a later bootstrap stage: extend this subset until a Concept
 compiler can be written in Concept, compile it with the C++ compiler, then package

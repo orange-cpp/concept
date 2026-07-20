@@ -101,6 +101,50 @@ void randomized_opcode_test() {
            "custom VM counts should preserve shared execution state");
 }
 
+void complexity_decorator_test() {
+    constexpr std::string_view plain_source = R"(
+        fn main() -> i32 {
+            i32 answer = 6 * 7;
+            return answer;
+        }
+    )";
+    constexpr std::string_view zero_source = R"(
+        @complexity(0)
+        fn main() -> i32 {
+            i32 answer = 6 * 7;
+            return answer;
+        }
+    )";
+    constexpr std::string_view medium_source = R"(
+        @complexty(25)
+        fn main() -> i32 {
+            i32 answer = 6 * 7;
+            return answer;
+        }
+    )";
+    constexpr std::string_view full_source = R"(
+        @complexity(100)
+        fn main() -> i32 {
+            i32 answer = 6 * 7;
+            return answer;
+        }
+    )";
+
+    const auto plain = cpt::compile(plain_source, "plain.concept", 8);
+    const auto zero = cpt::compile(zero_source, "zero.concept", 8);
+    const auto medium = cpt::compile(medium_source, "medium.concept", 8);
+    const auto full = cpt::compile(full_source, "full.concept", 8);
+
+    expect(plain.code == zero.code,
+           "complexity zero should emit straight bytecode");
+    expect(zero.code.size() < medium.code.size() &&
+               medium.code.size() < full.code.size(),
+           "higher complexity should emit progressively more bytecode");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(medium))) == 42 &&
+               cpt::execute(cpt::deserialize(cpt::serialize(full))) == 42,
+           "obfuscated bytecode should preserve behavior across eight VMs");
+}
+
 void console_io_test() {
     constexpr std::string_view source = R"(
         fn read_name() -> string {
@@ -252,6 +296,20 @@ void error_test() {
         expect(false, "a missing main function should be a compile error");
     } catch (const cpt::CompileError&) {
     }
+
+    try {
+        static_cast<void>(cpt::compile(
+            "@complexity(101) fn main() -> i32 { return 0; }"));
+        expect(false, "complexity above 100 should be a compile error");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(
+            "@unknown(25) fn main() -> i32 { return 0; }"));
+        expect(false, "unknown decorators should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
 }
 
 } // namespace
@@ -261,6 +319,7 @@ int main() {
         execution_test();
         forward_call_test();
         randomized_opcode_test();
+        complexity_decorator_test();
         console_io_test();
         core_types_test();
         error_test();
