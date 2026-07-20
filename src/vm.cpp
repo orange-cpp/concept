@@ -242,47 +242,6 @@ private:
     }
 };
 
-class MessageBoxApi {
-public:
-    MessageBoxApi() {
-        static constexpr std::array<std::uint8_t, 10> module_name{
-            0xd2, 0x97, 0x44, 0x2c, 0xa8, 0xea, 0x3b, 0x36, 0xe3, 0xa0};
-        const auto decoded_module = decode_import_name(module_name);
-        module_ = GetModuleHandleA(decoded_module.c_str());
-        if (module_ == nullptr) {
-            module_ = LoadLibraryA(decoded_module.c_str());
-        }
-        if (module_ == nullptr) {
-            throw std::runtime_error(xorstr_(
-                "Concept VM could not load message-box support"));
-        }
-
-        static constexpr std::array<std::uint8_t, 11> function_name{
-            0xea, 0x81, 0x52, 0x2d, 0xfa, 0xbf, 0x70, 0x10, 0xe0, 0xb4,
-            0x48};
-        const auto name = decode_import_name(function_name);
-        const auto address = GetProcAddress(module_, name.c_str());
-        if (address == nullptr) {
-            throw std::runtime_error(xorstr_(
-                "Concept VM could not resolve message-box support"));
-        }
-        static_assert(sizeof(function_) == sizeof(address));
-        function_ = std::bit_cast<decltype(function_)>(address);
-    }
-
-    MessageBoxApi(const MessageBoxApi&) = delete;
-    MessageBoxApi& operator=(const MessageBoxApi&) = delete;
-
-    int show(const std::string& text, const std::string& title) const {
-        return function_(nullptr, text.c_str(), title.c_str(),
-                         MB_OK | MB_ICONINFORMATION);
-    }
-
-private:
-    HMODULE module_{};
-    decltype(&::MessageBoxA) function_{};
-};
-
 WinsockApi& winsock_api() {
     static WinsockApi api;
     return api;
@@ -290,11 +249,6 @@ WinsockApi& winsock_api() {
 
 NativeMemoryApi& native_memory_api() {
     static NativeMemoryApi api;
-    return api;
-}
-
-MessageBoxApi& message_box_api() {
-    static MessageBoxApi api;
     return api;
 }
 
@@ -405,17 +359,67 @@ constexpr int send_flags = 0;
 #endif
 #endif
 
-std::int32_t show_message_box(const std::string& text,
-                              const std::string& title) {
-#ifdef _WIN32
-    return message_box_api().show(text, title);
-#else
-    static_cast<void>(text);
-    static_cast<void>(title);
-    throw std::runtime_error(
-        xorstr_("Concept message_box is supported only on Windows"));
-#endif
+#ifdef _WIN64
+std::uint64_t invoke_native_call(
+    const std::string& module_name, const std::string& symbol_name,
+    const std::array<std::uintptr_t, 4>& arguments,
+    const std::size_t argument_count) {
+    const auto module = LoadLibraryA(module_name.c_str());
+    if (module == nullptr) {
+        throw std::runtime_error(
+            xorstr_("Concept VM could not load a native module"));
+    }
+    const auto address = GetProcAddress(module, symbol_name.c_str());
+    if (address == nullptr) {
+        FreeLibrary(module);
+        throw std::runtime_error(
+            xorstr_("Concept VM could not resolve a native symbol"));
+    }
+
+    using Function0 = std::uintptr_t(WINAPI*)();
+    using Function1 = std::uintptr_t(WINAPI*)(std::uintptr_t);
+    using Function2 =
+        std::uintptr_t(WINAPI*)(std::uintptr_t, std::uintptr_t);
+    using Function3 = std::uintptr_t(WINAPI*)(
+        std::uintptr_t, std::uintptr_t, std::uintptr_t);
+    using Function4 = std::uintptr_t(WINAPI*)(
+        std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
+
+    std::uintptr_t result = 0;
+    switch (argument_count) {
+    case 0:
+        result = std::bit_cast<Function0>(address)();
+        break;
+    case 1:
+        result = std::bit_cast<Function1>(address)(arguments[0]);
+        break;
+    case 2:
+        result = std::bit_cast<Function2>(address)(arguments[0], arguments[1]);
+        break;
+    case 3:
+        result = std::bit_cast<Function3>(address)(
+            arguments[0], arguments[1], arguments[2]);
+        break;
+    case 4:
+        result = std::bit_cast<Function4>(address)(
+            arguments[0], arguments[1], arguments[2], arguments[3]);
+        break;
+    default:
+        FreeLibrary(module);
+        throw std::runtime_error(
+            xorstr_("Concept native call has too many arguments"));
+    }
+    FreeLibrary(module);
+    return static_cast<std::uint64_t>(result);
 }
+#else
+std::uint64_t invoke_native_call(
+    const std::string&, const std::string&,
+    const std::array<std::uintptr_t, 4>&, const std::size_t) {
+    throw std::runtime_error(
+        xorstr_("Concept native calls require Windows x64"));
+}
+#endif
 
 std::size_t native_value_size(const ValueType type) {
     switch (type) {
@@ -437,6 +441,9 @@ std::size_t native_value_size(const ValueType type) {
     case ValueType::text:
         throw std::runtime_error(
             xorstr_("Concept VM cannot access native string memory"));
+    case ValueType::void_type:
+        throw std::runtime_error(
+            xorstr_("Concept VM cannot dereference a void pointer"));
     }
     throw std::logic_error(xorstr_("invalid native pointer value type"));
 }
@@ -658,7 +665,7 @@ std::uint64_t read_u64(const std::vector<std::uint8_t>& code,
 
 ValueType read_type(const std::vector<std::uint8_t>& code, std::size_t& ip) {
     if (ip >= code.size() ||
-        code[ip] > static_cast<std::uint8_t>(ValueType::text)) {
+        code[ip] > static_cast<std::uint8_t>(ValueType::void_type)) {
         throw std::runtime_error(
             xorstr_("VM encountered an invalid value type"));
     }
@@ -722,7 +729,7 @@ std::uint64_t f64_bits(const double value) {
 }
 
 bool truthy(const ValueType type, const std::uint64_t bits) {
-    if (type == ValueType::text) {
+    if (type == ValueType::text || type == ValueType::void_type) {
         throw std::runtime_error(
             xorstr_("string cannot be used as a boolean"));
     }
@@ -786,7 +793,9 @@ std::uint64_t floating_to_integral(const long double value,
 std::uint64_t convert_value(const std::uint64_t bits,
                             const ValueType source,
                             const ValueType target) {
-    if (source == ValueType::text || target == ValueType::text) {
+    if (source == ValueType::text || target == ValueType::text ||
+        source == ValueType::void_type ||
+        target == ValueType::void_type) {
         throw std::runtime_error(xorstr_(
             "string conversion is not supported by the Concept VM"));
     }
@@ -1095,6 +1104,9 @@ void print_value(const ValueType type, const std::uint64_t bits,
     case ValueType::text:
         std::cout << text_value(heap, bits);
         break;
+    case ValueType::void_type:
+        throw std::runtime_error(
+            xorstr_("Concept VM cannot print a void value"));
     }
     if (newline) {
         std::cout << '\n';
@@ -1234,6 +1246,41 @@ std::int64_t execute(const Bytecode& bytecode) {
                 "Concept VM pointer refers to an expired local variable"));
         }
         return *frame;
+    };
+
+    const auto native_pointer_address = [&](const std::uint64_t handle) {
+        if (handle == 0) {
+            return std::uintptr_t{0};
+        }
+        const auto& target = pointer_target(handle);
+        if (target.kind == PointerTarget::Kind::local) {
+            auto& frame = local_frame(target.owner);
+            if (target.index >= frame.locals.size()) {
+                throw std::runtime_error(xorstr_(
+                    "Concept native-call local pointer is out of range"));
+            }
+            return reinterpret_cast<std::uintptr_t>(
+                &frame.locals[static_cast<std::size_t>(target.index)]);
+        }
+        if (target.kind == PointerTarget::Kind::field) {
+            auto& fields = object_fields(target.owner);
+            if (target.index >= fields.size()) {
+                throw std::runtime_error(xorstr_(
+                    "Concept native-call field pointer is out of range"));
+            }
+            return reinterpret_cast<std::uintptr_t>(
+                &fields[static_cast<std::size_t>(target.index)]);
+        }
+        if (target.kind == PointerTarget::Kind::heap_block) {
+            auto& block = heap_block(target.owner);
+            if (target.index > block.bytes.size()) {
+                throw std::runtime_error(xorstr_(
+                    "Concept native-call heap pointer is out of range"));
+            }
+            return reinterpret_cast<std::uintptr_t>(
+                block.bytes.data() + target.index);
+        }
+        return static_cast<std::uintptr_t>(target.owner);
     };
 
     const auto load_pointer = [&](const std::uint64_t handle) {
@@ -1686,12 +1733,38 @@ std::int64_t execute(const Bytecode& bytecode) {
             stack.push_back(0);
             break;
         }
-        case Op::message_box: {
-            const auto title = pop();
-            const auto message = pop();
-            stack.push_back(static_cast<std::uint64_t>(show_message_box(
-                text_value(text_heap, message),
-                text_value(text_heap, title))));
+        case Op::native_call: {
+            const auto argument_count = pop();
+            if (argument_count > 4) {
+                throw std::runtime_error(
+                    xorstr_("Concept native call has too many arguments"));
+            }
+            std::array<std::uintptr_t, 4> arguments{};
+            for (std::size_t index =
+                     static_cast<std::size_t>(argument_count);
+                 index != 0; --index) {
+                const auto kind = pop();
+                const auto value = pop();
+                if (kind == 0) {
+                    arguments[index - 1] =
+                        static_cast<std::uintptr_t>(value);
+                } else if (kind == 1) {
+                    arguments[index - 1] =
+                        reinterpret_cast<std::uintptr_t>(
+                            text_value(text_heap, value).c_str());
+                } else if (kind == 2) {
+                    arguments[index - 1] = native_pointer_address(value);
+                } else {
+                    throw std::runtime_error(xorstr_(
+                        "Concept native call has an invalid argument type"));
+                }
+            }
+            const auto symbol = pop();
+            const auto module = pop();
+            stack.push_back(invoke_native_call(
+                text_value(text_heap, module),
+                text_value(text_heap, symbol), arguments,
+                static_cast<std::size_t>(argument_count)));
             break;
         }
         case Op::socket_open:

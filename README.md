@@ -45,8 +45,11 @@ On Windows, `--shared-module` packages a DLL instead. A shared module uses a
 parameterless `dll_main` function returning `bool`:
 
 ```c
+import std::win_api;
+
 fn dll_main() -> bool {
-    return message_box("Concept DLL loaded successfully.", "Concept") != 0;
+    return std::win_api::message_box(
+        "Concept DLL loaded successfully.", "Concept") != 0;
 }
 ```
 
@@ -136,7 +139,9 @@ The bootstrap subset supports:
 - `input()`/`input_text()` for whole lines, plus `input_i64()` and
   `input_f64()` for parsed numeric lines;
 - `print(value)` and `println(value)` for every core value type;
-- Windows `message_box(text, title)` with lazy, encoded User32 resolution;
+- the Concept-defined Windows wrapper
+  `std::win_api::message_box(text, title)` and module lookup through
+  `std::win_api::get_module_hadle(name)`;
 - `//` line comments.
 - qualified top-level imports such as `import std::socket;`.
 - classes with core-type fields, optional constructors, automatic
@@ -181,12 +186,13 @@ fields can be addressed; multi-level pointers and pointer fields are supported.
 
 `ptr_cast<T>(address)` explicitly creates a `T*` into the generated program's
 native address space. Its address expression must be integral, and `T` may be a
-numeric or `bool` core type. On Windows, native reads and writes are checked and
+numeric or `bool` core type, or `void`. A `void*` is opaque: it can be stored,
+returned, and passed as an argument, but not dereferenced, indexed, or used in
+pointer arithmetic. On Windows, typed native reads and writes are checked and
 produce a VM error when the requested memory is inaccessible. The programmer is
 still responsible for using a correct live address and matching value type.
-Native `string` and class pointers are not supported. Pointer arithmetic and
-pointer parameters are supported; general pointer casts and pointer function
-returns are not implemented yet.
+Native `string` and class pointers are not supported. Pointer parameters and
+pointer function returns are supported; general pointer casts are not.
 
 Strings currently support storage, function returns, printing, and `==`/`!=`.
 Concatenation, indexing, and conversion between strings and numeric values are

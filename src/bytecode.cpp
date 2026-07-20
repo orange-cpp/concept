@@ -18,7 +18,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 12;
+constexpr std::uint32_t bytecode_version = 14;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -112,7 +112,7 @@ std::size_t operand_size(const Op op) {
     case Op::input_text:
     case Op::input_i64:
     case Op::input_f64:
-    case Op::message_box:
+    case Op::native_call:
     case Op::socket_open:
     case Op::socket_connect:
     case Op::socket_bind:
@@ -529,7 +529,7 @@ void validate(const Bytecode& bytecode) {
 
         const auto check_type = [&](const std::size_t type_offset) {
             if (bytecode.code[type_offset] >
-                static_cast<std::uint8_t>(ValueType::text)) {
+                static_cast<std::uint8_t>(ValueType::void_type)) {
                 throw std::runtime_error(
                     xorstr_("invalid value type in Concept bytecode"));
             }
@@ -537,13 +537,23 @@ void validate(const Bytecode& bytecode) {
         };
 
         if (op == Op::convert) {
-            static_cast<void>(check_type(offset));
-            static_cast<void>(check_type(offset + 1));
+            const auto source = check_type(offset);
+            const auto target = check_type(offset + 1);
+            if (source == ValueType::void_type ||
+                target == ValueType::void_type) {
+                throw std::runtime_error(xorstr_(
+                    "void conversion in Concept bytecode"));
+            }
         } else if (size == 1 || op == Op::array_alloc) {
             const auto type = check_type(offset);
             if (op == Op::native_pointer && type == ValueType::text) {
                 throw std::runtime_error(
                     xorstr_("native string pointer in Concept bytecode"));
+            }
+            if (type == ValueType::void_type &&
+                op != Op::native_pointer && op != Op::heap_alloc) {
+                throw std::runtime_error(xorstr_(
+                    "invalid void operation in Concept bytecode"));
             }
             if ((op == Op::add || op == Op::subtract ||
                  op == Op::multiply || op == Op::divide ||

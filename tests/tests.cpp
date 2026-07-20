@@ -763,27 +763,85 @@ void shared_module_entry_test() {
     } catch (const cpt::CompileError&) {
     }
 
-    const auto message_box = cpt::compile(R"(
+    const auto source_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path();
+    const auto standard_modules = source_root / "concept";
+    constexpr std::string_view message_box_source = R"(
+        import std::win_api;
         fn main() -> i32 {
-            return message_box("Concept VM is ready.", "Concept");
+            return std::win_api::message_box(
+                "Concept VM is ready.", "Concept");
         }
-    )", "message-box-test.concept");
+    )";
+#ifdef _WIN64
+    const auto message_box = cpt::compile(
+        message_box_source, "message-box-test.concept", 4,
+        standard_modules.string());
     expect(!cpt::serialize(message_box).empty(),
-           "message_box should compile into serializable bytecode");
+           "the Concept message-box wrapper should compile into bytecode");
+    const auto native_call = cpt::compile(R"(
+        import std::win_api;
+        fn main() -> bool {
+            void* module =
+                std::win_api::get_module_hadle("kernel32.dll");
+            return __win_api_call(
+                "kernel32.dll", "GetProcAddress",
+                module, "GetModuleHandleA") != 0;
+        }
+    )", "native-call-test.concept", 4, standard_modules.string());
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(native_call))) == 1,
+           "get_module_hadle should return a usable void pointer");
 
     try {
         static_cast<void>(cpt::compile(R"(
-            fn main() -> i32 { return message_box("missing title"); }
+            fn main() -> i32 {
+                void value;
+                return 0;
+            }
         )"));
-        expect(false, "message_box should require text and title");
+        expect(false, "void should not be available as a value type");
     } catch (const cpt::CompileError&) {
     }
 
     try {
         static_cast<void>(cpt::compile(R"(
-            fn main() -> i32 { return message_box(42, "Concept"); }
+            fn invalid(void* value) -> i32 { return *value; }
+            fn main() -> i32 { return 0; }
         )"));
-        expect(false, "message_box arguments should be strings");
+        expect(false, "void pointers should not be dereferenceable");
+    } catch (const cpt::CompileError&) {
+    }
+#else
+    try {
+        static_cast<void>(cpt::compile(
+            message_box_source, "message-box-test.concept", 4,
+            standard_modules.string()));
+        expect(false, "std::win_api should be rejected outside Windows x64");
+    } catch (const cpt::CompileError&) {
+    }
+#endif
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            import std::win_api;
+            fn main() -> i32 {
+                return std::win_api::message_box("missing title");
+            }
+        )", "message-box-arity-test.concept", 4,
+            standard_modules.string()));
+        expect(false, "the message-box wrapper should require text and title");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            import std::win_api;
+            fn main() -> i32 {
+                return std::win_api::message_box(42, "Concept");
+            }
+        )", "message-box-type-test.concept", 4,
+            standard_modules.string()));
+        expect(false, "the message-box wrapper arguments should be strings");
     } catch (const cpt::CompileError&) {
     }
 }

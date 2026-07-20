@@ -1,0 +1,13 @@
+// Windows x64 API wrappers implemented in Concept.
+//
+// Import as `import std::win_api;`.
+
+fn std::win_api::message_box(string message, string title) -> i32 {
+    return i32(__win_api_call(
+        "user32.dll", "MessageBoxA", u64(0), message, title, u32(64)));
+}
+
+fn std::win_api::get_module_hadle(string module_name) -> void* {
+    return ptr_cast<void>(__win_api_call(
+        "kernel32.dll", "GetModuleHandleA", module_name));
+}

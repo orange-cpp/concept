@@ -21,6 +21,7 @@ enum class ValueType : std::uint8_t {
     f32,
     f64,
     text,
+    void_type,
 };
 
 [[nodiscard]] constexpr bool is_integral(const ValueType type) {
@@ -81,7 +82,7 @@ enum class Op : std::uint8_t {
     input_f64,
     print,
     println,
-    message_box,
+    native_call,
     socket_open,
     socket_connect,
     socket_bind,

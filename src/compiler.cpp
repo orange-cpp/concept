@@ -114,6 +114,9 @@ ValueType value_type_from_name(const std::string_view name) {
     if (name == "string" || name == "text") {
         return ValueType::text;
     }
+    if (name == "void") {
+        return ValueType::void_type;
+    }
     throw std::logic_error("invalid type token");
 }
 
@@ -143,6 +146,8 @@ std::string_view value_type_name(const ValueType type) {
         return "f64";
     case ValueType::text:
         return "string";
+    case ValueType::void_type:
+        return "void";
     }
     throw std::logic_error("invalid value type");
 }
@@ -153,7 +158,7 @@ bool is_type_name(const std::string_view name) {
            name == "u16" || name == "u32" || name == "u64" ||
            name == "f32" || name == "f64" || name == "int" ||
            name == "float" || name == "double" || name == "string" ||
-           name == "text";
+           name == "text" || name == "void";
 }
 
 std::uint64_t mix_seed(std::uint64_t value) {
@@ -513,6 +518,7 @@ struct Function {
     Token name;
     ValueType return_type{ValueType::i64};
     bool return_template_type{};
+    std::uint8_t return_pointer_depth{};
     std::uint8_t complexity{};
     std::string class_name;
     bool constructor{};
@@ -711,6 +717,14 @@ private:
             const auto return_type =
                 consume(TokenKind::type_kw, "expected function return type");
             function.return_type = value_type_from_name(return_type.text);
+        }
+        while (match(TokenKind::star)) {
+            if (function.return_pointer_depth ==
+                std::numeric_limits<std::uint8_t>::max()) {
+                fail(function.name,
+                     "return pointer type has too many indirections");
+            }
+            ++function.return_pointer_depth;
         }
         function.body = parse_block_contents();
         return function;
@@ -1365,6 +1379,14 @@ private:
 
     void load_import(const Import& import,
                      const std::filesystem::path& importer) {
+#ifndef _WIN64
+        if (import.name.text == "std::win_api") {
+            throw CompileError(import.name.filename + ':' +
+                               std::to_string(import.name.line) + ':' +
+                               std::to_string(import.name.column) +
+                               ": module 'std::win_api' requires Windows x64");
+        }
+#endif
         const auto path = resolve(import, importer);
         const auto key = path_key(path);
         if (active_.contains(key)) {
@@ -1422,6 +1444,7 @@ struct FunctionInfo {
     std::uint32_t entry{};
     std::uint32_t locals{};
     ValueType return_type{ValueType::i64};
+    std::uint8_t return_pointer_depth{};
     std::vector<SemanticType> parameters;
 };
 
@@ -1520,13 +1543,15 @@ public:
         result.entry_type = entry->second.return_type;
         result.strings = std::move(strings_);
         if (mode_ == CompileMode::shared_module &&
-            result.entry_type != ValueType::boolean) {
+            (entry->second.return_pointer_depth != 0 ||
+             result.entry_type != ValueType::boolean)) {
             throw CompileError(std::string(filename_) +
                                ": 'dll_main' must return bool");
         }
         if (mode_ == CompileMode::executable &&
-            !is_integral(result.entry_type) &&
-            result.entry_type != ValueType::boolean) {
+            (entry->second.return_pointer_depth != 0 ||
+             (!is_integral(result.entry_type) &&
+              result.entry_type != ValueType::boolean))) {
             throw CompileError(std::string(filename_) +
                                ": 'main' must return an integral type or bool");
         }
@@ -1548,6 +1573,7 @@ private:
     std::vector<CallPatch> call_patches_;
     std::vector<std::string> strings_;
     ValueType current_return_type_{ValueType::i64};
+    std::uint8_t current_return_pointer_depth_{};
     std::string current_class_;
     std::optional<ValueType> current_template_type_;
     bool current_is_constructor_{};
@@ -1593,8 +1619,13 @@ private:
             fail(parameter.name,
                  "generic parameter type requires a specialization");
         }
-        return {parameter.template_type ? *argument : parameter.type,
-                parameter.class_name, parameter.pointer_depth};
+        const auto type =
+            parameter.template_type ? *argument : parameter.type;
+        if (type == ValueType::void_type && parameter.pointer_depth == 0) {
+            fail(parameter.name,
+                 "void is valid only as a pointer base type");
+        }
+        return {type, parameter.class_name, parameter.pointer_depth};
     }
 
     std::vector<SemanticType> resolve_parameters(
@@ -1626,6 +1657,10 @@ private:
                      "generic field type requires a specialization");
             }
             const auto type = field.template_type ? *argument : field.type;
+            if (type == ValueType::void_type && field.pointer_depth == 0) {
+                fail(field.name,
+                     "void is valid only as a pointer base type");
+            }
             if (!info.fields
                      .emplace(field.name.text,
                               FieldInfo{static_cast<std::uint16_t>(index),
@@ -1762,6 +1797,11 @@ private:
         const ValueType return_type,
         const std::optional<ValueType> template_type = std::nullopt) {
         auto parameters = resolve_parameters(function, template_type);
+        if (return_type == ValueType::void_type &&
+            function.return_pointer_depth == 0) {
+            fail(function.name,
+                 "void is valid only as a pointer base type");
+        }
         std::unordered_set<std::string> names;
         for (std::size_t index = 0; index < parameters.size(); ++index) {
             const auto& parameter = function.parameters[index];
@@ -1777,6 +1817,7 @@ private:
         }
         if (!function_info_
                  .emplace(key, FunctionInfo{0, 0, return_type,
+                                            function.return_pointer_depth,
                                             std::move(parameters)})
                  .second) {
             fail(function.name, "duplicate function '" + key + "'");
@@ -1852,6 +1893,7 @@ private:
         current_return_type_ = function.return_template_type
                                    ? *template_type
                                    : function.return_type;
+        current_return_pointer_depth_ = function.return_pointer_depth;
         current_class_ = class_name;
         current_is_constructor_ = function.constructor;
         current_complexity_ = function.complexity;
@@ -1884,7 +1926,12 @@ private:
         }
 
         emit_obfuscation();
-        emit_default_value(current_return_type_);
+        if (current_return_pointer_depth_ != 0) {
+            emit(Op::push_bits);
+            emit_u64(0);
+        } else {
+            emit_default_value(current_return_type_);
+        }
         emit(Op::return_value);
         info.locals = static_cast<std::uint32_t>(locals_.size());
     }
@@ -1912,6 +1959,11 @@ private:
             const auto value_type = statement.template_type
                                         ? *current_template_type_
                                         : statement.value_type;
+            if (value_type == ValueType::void_type &&
+                statement.pointer_depth == 0) {
+                fail(statement.token,
+                     "void is valid only as a pointer base type");
+            }
             const auto index = static_cast<std::uint16_t>(locals_.size());
             locals_.emplace(statement.name,
                             LocalInfo{index, value_type,
@@ -2028,6 +2080,11 @@ private:
                     compile_expression(*statement.target->right));
                 target_type = pointer_type;
                 --target_type.pointer_depth;
+                if (target_type.pointer_depth == 0 &&
+                    target_type.type == ValueType::void_type) {
+                    fail(statement.target->token,
+                         "void pointer cannot be dereferenced");
+                }
             }
             compile_semantic_expression_as(*statement.expression,
                                            target_type);
@@ -2043,7 +2100,15 @@ private:
                 fail(statement.token,
                      "constructors cannot return a value");
             }
-            compile_expression_as(*statement.expression, current_return_type_);
+            if (current_return_pointer_depth_ != 0) {
+                compile_pointer_expression_as(
+                    *statement.expression,
+                    SemanticType{current_return_type_, {},
+                                 current_return_pointer_depth_});
+            } else {
+                compile_expression_as(*statement.expression,
+                                      current_return_type_);
+            }
             emit(Op::return_value);
             return;
         case Stmt::Kind::if_statement: {
@@ -2140,7 +2205,9 @@ private:
                     expression.arguments.size()));
                 call_patches_.push_back({target_offset, locals_offset,
                                          expression.token, method});
-                return function.return_type;
+                return function.return_pointer_depth != 0
+                           ? ValueType::u64
+                           : function.return_type;
             }
             if (class_info_.contains(expression.name)) {
                 emit_construct_object(expression.name, expression.token,
@@ -2161,7 +2228,9 @@ private:
                 expression.arguments.size()));
             call_patches_.push_back(
                 {target_offset, locals_offset, expression.token, expression.name});
-            return function.return_type;
+            return function.return_pointer_depth != 0
+                       ? ValueType::u64
+                       : function.return_type;
         }
         case Expr::Kind::cast: {
             static_cast<void>(semantic_type(expression));
@@ -2305,6 +2374,11 @@ private:
                      "array index must be an integral value");
             }
             --pointer.pointer_depth;
+            if (pointer.pointer_depth == 0 &&
+                pointer.type == ValueType::void_type) {
+                fail(expression.token,
+                     "void pointer cannot be indexed");
+            }
             return pointer;
         }
         case Expr::Kind::member: {
@@ -2335,7 +2409,8 @@ private:
                 const auto& function =
                     lookup_function(expression.token, method);
                 validate_call_arguments(expression, function);
-                return {function.return_type, {}, 0};
+                return {function.return_type, {},
+                        function.return_pointer_depth};
             }
             if (class_info_.contains(expression.name)) {
                 validate_constructor_arguments(expression.name, expression);
@@ -2351,7 +2426,8 @@ private:
             const auto& function =
                 lookup_function(expression.token, expression.name);
             validate_call_arguments(expression, function);
-            return {function.return_type, {}, 0};
+            return {function.return_type, {},
+                    function.return_pointer_depth};
         }
         case Expr::Kind::cast: {
             const auto source = semantic_type(*expression.right);
@@ -2361,6 +2437,10 @@ private:
             if (!source.class_name.empty()) {
                 fail(expression.token, "cannot cast class object '" +
                                            source.class_name + "'");
+            }
+            if (expression.value_type == ValueType::void_type) {
+                fail(expression.token,
+                     "void is valid only as a pointer base type");
             }
             return {expression.value_type, {}, 0};
         }
@@ -2405,6 +2485,11 @@ private:
                          "dereference operator requires a pointer");
                 }
                 --operand.pointer_depth;
+                if (operand.pointer_depth == 0 &&
+                    operand.type == ValueType::void_type) {
+                    fail(expression.token,
+                         "void pointer cannot be dereferenced");
+                }
                 return operand;
             }
             if (operand.pointer_depth != 0) {
@@ -2441,6 +2526,10 @@ private:
                     fail(expression.token,
                          "pointer arithmetic supports only pointer + integer, "
                          "integer + pointer, and pointer - integer");
+                }
+                if (pointer.type == ValueType::void_type) {
+                    fail(expression.token,
+                         "void pointer arithmetic is not supported");
                 }
                 if (!offset.class_name.empty() ||
                     offset.pointer_depth != 0 ||
@@ -2630,7 +2719,7 @@ private:
         return name == "input" || name == "input_text" ||
                name == "input_i64" || name == "input_f64" ||
                name == "print" || name == "println" ||
-               name == "message_box" || name == "malloc" ||
+               name == "__win_api_call" || name == "malloc" ||
                name == "free";
     }
 
@@ -2676,18 +2765,42 @@ private:
             }
             return ValueType::i64;
         }
-        if (expression.name == "message_box") {
-            require_arguments(2);
-            for (const auto& expression_argument : expression.arguments) {
-                const auto argument = semantic_type(*expression_argument);
+        if (expression.name == "__win_api_call") {
+#ifndef _WIN64
+            fail(expression.token,
+                 "native Windows calls require Windows x64");
+#else
+            if (expression.arguments.size() < 2 ||
+                expression.arguments.size() > 6) {
+                fail(expression.token,
+                     "internal Windows call expects a module, symbol, and "
+                     "up to four native arguments");
+            }
+            for (std::size_t index = 0; index < 2; ++index) {
+                const auto argument =
+                    semantic_type(*expression.arguments[index]);
                 if (argument.pointer_depth != 0 ||
                     !argument.class_name.empty() ||
                     argument.type != ValueType::text) {
-                    fail(expression_argument->token,
-                         "message_box expects string arguments");
+                    fail(expression.arguments[index]->token,
+                         "native module and symbol names must be strings");
                 }
             }
-            return ValueType::i32;
+            for (std::size_t index = 2;
+                 index < expression.arguments.size(); ++index) {
+                const auto argument =
+                    semantic_type(*expression.arguments[index]);
+                if (!argument.class_name.empty() ||
+                    (argument.pointer_depth == 0
+                         ? is_floating(argument.type)
+                         : argument.type == ValueType::text)) {
+                    fail(expression.arguments[index]->token,
+                         "native arguments must be integral, bool, string, or "
+                         "non-string pointer values");
+                }
+            }
+            return ValueType::u64;
+#endif
         }
         if (expression.name == "print" || expression.name == "println") {
             require_arguments(1);
@@ -2730,10 +2843,22 @@ private:
             emit(Op::heap_free);
             return result_type;
         }
-        if (expression.name == "message_box") {
+        if (expression.name == "__win_api_call") {
             compile_expression_as(*expression.arguments[0], ValueType::text);
             compile_expression_as(*expression.arguments[1], ValueType::text);
-            emit(Op::message_box);
+            for (std::size_t index = 2;
+                 index < expression.arguments.size(); ++index) {
+                const auto& argument = *expression.arguments[index];
+                const auto type = semantic_type(argument);
+                static_cast<void>(compile_expression(argument));
+                emit(Op::push_bits);
+                emit_u64(type.pointer_depth != 0
+                             ? 2
+                             : type.type == ValueType::text ? 1 : 0);
+            }
+            emit(Op::push_bits);
+            emit_u64(expression.arguments.size() - 2);
+            emit(Op::native_call);
             return result_type;
         }
         const auto argument_type =
@@ -3113,6 +3238,9 @@ private:
     }
 
     void emit_default_value(const ValueType type) {
+        if (type == ValueType::void_type) {
+            throw std::logic_error("void has no Concept default value");
+        }
         if (type == ValueType::text) {
             emit(Op::push_text);
             emit_u32(add_string(""));
@@ -3197,7 +3325,9 @@ private:
         if (source == target) {
             return;
         }
-        if (source == ValueType::text || target == ValueType::text) {
+        if (source == ValueType::text || target == ValueType::text ||
+            source == ValueType::void_type ||
+            target == ValueType::void_type) {
             fail(token, "cannot convert " +
                             std::string(value_type_name(source)) + " to " +
                             std::string(value_type_name(target)));

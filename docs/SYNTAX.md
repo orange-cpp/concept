@@ -83,18 +83,19 @@ core-type         = "bool" | "i8" | "i16" | "i32" | "i64"
                   | "string" | "text" ;
 generic-parameter = identifier ;
 generic-class-type = qualified-identifier, "<", core-type, ">" ;
-local-type        = ( core-type | qualified-identifier
+local-type        = ( core-type | "void" | qualified-identifier
                     | generic-class-type ), { "*" } ;
 class-declaration = "class", qualified-identifier,
                     [ "<", identifier, ">" ], "{",
                     { field-declaration | constructor-declaration
                     | function-declaration }, "}" ;
-field-declaration = ( core-type | generic-parameter ),
+field-declaration = ( core-type | "void" | generic-parameter ),
                     { "*" }, identifier, ";" ;
 constructor-declaration = "constructor", "(", [ parameters ], ")", block ;
 function-declaration = { decorator }, "fn", identifier,
                        "(", [ parameters ], ")", "->",
-                       ( core-type | generic-parameter ), block ;
+                       ( core-type | "void" | generic-parameter ),
+                       { "*" }, block ;
 parameters        = parameter, { ",", parameter } ;
 parameter         = local-type, identifier ;
 decorator         = "@complexity(", decimal-integer, ")" ;
@@ -122,8 +123,8 @@ completed `LoadLibrary` call fail. Concept code is not started for thread
 attach, thread detach, or process detach. Operations such as `message_box` and
 sockets run from the worker rather than the native `DllMain` callback.
 
-Functions accept zero or more comma-separated typed parameters and return one
-core type:
+Functions accept zero or more comma-separated typed parameters and return a
+core value or pointer:
 
 ```c
 fn add(i32 left, i32 right) -> i32 {
@@ -140,8 +141,9 @@ end of a function without `return` returns that function's default value.
 Parameters may be core values, pointers, class objects, or concrete generic
 class specializations. Arguments use the same numeric conversions as
 assignment; pointer and class arguments must have matching types. Calls require
-the exact declared argument count. Pointer, class, and no-value return types are
-not currently available.
+the exact declared argument count. Pointer returns use the declared pointee type
+and indirection depth. Class and no-value returns are not currently available;
+`void` is legal only as the base of a pointer type such as `void*`.
 
 ## Variables and assignment
 
@@ -328,10 +330,12 @@ u32 current = *mapped;
 *mapped = current + 1;
 ```
 
-`T` must be a numeric or `bool` core type. It determines the number and
-interpretation of bytes read or written. The address belongs to the generated
-program's own native process and must be valid for the requested operation.
-Address `0` produces a null pointer.
+`T` must be a numeric or `bool` core type, or `void`. A concrete core type
+determines the number and interpretation of bytes read or written. A `void*` is
+an opaque native address: it can be stored, returned, or passed to another
+function, but it cannot be dereferenced, indexed, or used in pointer arithmetic.
+The address belongs to the generated program's own native process and must be
+valid for the requested operation. Address `0` produces a null pointer.
 
 Guarded native dereferencing is currently implemented on Windows. An
 inaccessible address produces a VM error rather than a normal Concept value.
@@ -340,8 +344,8 @@ class pointers are not supported.
 
 `ptr_cast` is intentionally explicit because native memory access bypasses the
 safety of normal VM references. Element-scaled pointer arithmetic and indexing
-work on native pointers. Pointer comparisons, general pointer-to-pointer casts,
-and pointer function returns are not implemented yet.
+work on typed native pointers. Pointer comparisons and general
+pointer-to-pointer casts are not implemented yet.
 
 ## Classes
 
@@ -457,7 +461,7 @@ This decorator raises reverse-engineering cost but is not a security boundary.
 Every compilation also independently randomizes opcode numbers for each VM
 context.
 
-## Built-in input, output, and Windows UI
+## Built-in input and output
 
 | Function | Return | Behavior |
 |---|---|---|
@@ -467,13 +471,47 @@ context.
 | `input_f64()` | `f64` | Reads and parses one floating-point line |
 | `print(value)` | `i64` | Prints one core value without a newline |
 | `println(value)` | `i64` | Prints one core value followed by a newline |
-| `message_box(string text, string title)` | `i32` | Shows a Windows information dialog and returns its native result |
 
 Input parse failures stop the VM with an error. `print` and `println` accept
 core values, but not pointers or class objects. Both return `0`, so they can be
-used as expression statements. `message_box` is available only on Windows. It
-resolves its encoded `USER32.dll` and `MessageBoxA` names lazily when executed,
-so binaries that do not use it have no static User32 import.
+used as expression statements.
+
+## `std::win_api`
+
+`std::win_api` contains Windows API wrappers implemented in Concept source.
+It is available only when the compiler itself targets Windows x64; importing it
+on Linux, macOS, or 32-bit Windows is a compile-time error.
+
+```c
+import std::win_api;
+
+i32 result = std::win_api::message_box(
+    "Concept DLL loaded successfully.", "Concept");
+
+void* kernel32 = std::win_api::get_module_hadle("kernel32.dll");
+```
+
+| Function | Return | Behavior |
+|---|---|---|
+| `std::win_api::message_box(string text, string title)` | `i32` | Show a Windows information dialog and return its native result |
+| `std::win_api::get_module_hadle(string module_name)` | `void*` | Return the loaded module handle from `GetModuleHandleA`, or null if it is not loaded |
+
+The wrapper in `concept/std/win_api.concept` supplies the module name, symbol
+name, null owner, and information-dialog flags. The compiler and VM do not have
+a MessageBox-specific instruction. All Windows wrappers share one internal
+native-call instruction that resolves the requested module and symbol lazily.
+
+The initial Windows x64 native-call ABI accepts zero to four integral, `bool`,
+string, or non-string pointer arguments and returns one native word, which a
+wrapper casts to its public type. Floating arguments, structures passed by
+value, callbacks, and calls with more than four arguments are not supported
+yet. String pointers are borrowed only for the duration of the call. Module and
+symbol strings remain encrypted in packaged bytecode, and no static import is
+added for the requested Windows component.
+
+An incorrect module name, symbol name, argument count, or native signature is a
+programming error in the wrapper. The VM checks the supported argument kinds,
+but it cannot recover safely from calling a native symbol with the wrong ABI.
 
 ## `std::array<T>`
 
@@ -589,6 +627,7 @@ This grammar summarizes the parser. Semantic type restrictions described above
 still apply.
 
 ```ebnf
+return-type    = ( core-type | "void" | generic-parameter ), { "*" } ;
 parameter      = local-type, identifier ;
 parameters     = parameter, { ",", parameter } ;
 function       = { decorator }, "fn", identifier,
@@ -621,7 +660,8 @@ primary        = literal
                | identifier, "(", [ arguments ], ")"
                | generic-class-type, "(", [ arguments ], ")"
                | core-type, "(", expression, ")"
-               | "ptr_cast", "<", core-type, ">", "(", expression, ")"
+               | "ptr_cast", "<", ( core-type | "void" ), ">",
+                 "(", expression, ")"
                | "(", expression, ")" ;
 arguments      = expression, { ",", expression } ;
 ```
@@ -633,7 +673,7 @@ The current language does not yet provide:
 - default arguments, variadic parameters, or function/method overloading;
 - generic functions, multiple generic parameters, or non-core generic
   arguments;
-- pointer, class, or `void` function returns;
+- class or no-value (`void`) function returns;
 - object destruction;
 - `for`, `do`, `switch`, `break`, or `continue`;
 - logical short-circuit, bitwise, compound-assignment, increment, decrement, or

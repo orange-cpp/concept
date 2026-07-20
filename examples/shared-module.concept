@@ -1,3 +1,5 @@
+import std::win_api;
+
 class Checksum {
     i32 value;
 
@@ -16,7 +18,7 @@ fn dll_main() -> bool {
     if (!checksum.matches(42)) {
         return false;
     }
-    i32 result = message_box(
+    i32 result = std::win_api::message_box(
         "Concept DLL loaded and the VM check passed.",
         "Concept shared module");
     return result != 0;
