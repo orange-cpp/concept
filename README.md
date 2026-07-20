@@ -1,6 +1,6 @@
 # Concept
 
-Concept is an experimental C-like language designed to help protect compiled applications from reverse engineering. It compiles programs to bytecode and packages each one as a native executable containing both the Concept virtual machine and the program bytecode.
+Concept is an experimental C-like language designed to help protect compiled applications from reverse engineering. It compiles programs to bytecode and packages each one as a native executable or Windows DLL containing both the Concept virtual machine and the program bytecode.
 
 See the [Concept language syntax reference](docs/SYNTAX.md) for the grammar,
 types, operators, pointers, classes, imports, and built-in APIs implemented now.
@@ -40,6 +40,30 @@ The interactive calculator example can be built and run with:
 .\build\Release\concept.exe .\examples\calculator.concept -o calculator.exe
 .\calculator.exe
 ```
+
+On Windows, `--shared-module` packages a DLL instead. A shared module uses a
+parameterless `dll_main` function returning `bool`:
+
+```c
+fn dll_main() -> bool {
+    return message_box("Concept DLL loaded successfully.", "Concept") != 0;
+}
+```
+
+```powershell
+.\build\Release\concept.exe .\examples\shared-module.concept `
+    --shared-module -o example-shared.dll --vms 8
+```
+
+The compiler automatically selects `concept-runtime-shared.dll`. Its native
+`DllMain` takes a temporary module reference, starts a worker thread for Concept
+`dll_main`, closes the thread handle, and returns immediately. It never waits
+for the VM while holding the loader lock. The worker releases its module
+reference atomically when it exits, so the DLL cannot unload underneath it.
+Because initialization is asynchronous, returning `false` reports worker
+failure through its thread result and debugger output but cannot make the
+original `LoadLibrary` call fail. Thread and detach notifications do not start
+Concept code.
 
 Source modules live in a `concept` directory and use the module filename
 without its extension:
@@ -112,6 +136,7 @@ The bootstrap subset supports:
 - `input()`/`input_text()` for whole lines, plus `input_i64()` and
   `input_f64()` for parsed numeric lines;
 - `print(value)` and `println(value)` for every core value type;
+- Windows `message_box(text, title)` with lazy, encoded User32 resolution;
 - `//` line comments.
 - qualified top-level imports such as `import std::socket;`.
 - classes with core-type fields, optional constructors, automatic
@@ -170,13 +195,14 @@ per-compilation ChaCha20 key and decrypted when the runtime loads the program.
 The key must be recoverable from the executable, so this hides plaintext but is
 an obfuscation boundary rather than secret-key protection.
 
-Every program must define `main` with an integral or `bool` return type. Its
-result becomes the executable's process exit code. Numeric values are converted
-as needed by initialization, assignment, return statements, mixed arithmetic,
-and conditions. Narrow integral arithmetic wraps at the operation's selected
-width. Integral division and modulo by zero are runtime errors; floating-point
-operations use IEEE behavior. Floating-to-integral casts reject non-finite and
-out-of-range values at runtime.
+Executable programs define `main` with an integral or `bool` return type. Its
+result becomes the process exit code. Shared modules instead define
+`dll_main() -> bool`. Numeric values are converted as needed by initialization,
+assignment, return statements, mixed arithmetic, and conditions. Narrow
+integral arithmetic wraps at the operation's selected width. Integral division
+and modulo by zero are runtime errors; floating-point operations use IEEE
+behavior. Floating-to-integral casts reject non-finite and out-of-range values
+at runtime.
 
 ## Architecture
 
@@ -184,7 +210,7 @@ The compiler performs this pipeline:
 
 ```text
 source -> lexer/parser -> bytecode compiler -> bytecode image
-       -> copy native VM stub -> append image and trailer -> program.exe
+       -> copy native VM stub -> append image and trailer -> program.exe/.dll
 ```
 
 The runtime reads the trailer from its own executable, verifies and deserializes

@@ -43,7 +43,8 @@ std::string read_source(const std::filesystem::path& path) {
 
 void print_usage() {
     std::cerr << "usage: concept <source.concept> [-o <program.exe>] "
-                 "[--runtime <concept-runtime.exe>] [--vms <1..64>]\n";
+                 "[--runtime <runtime>] [--vms <1..64>] "
+                 "[--shared-module]\n";
 }
 
 } // namespace
@@ -71,6 +72,9 @@ int main(const int argc, char** argv) {
             "concept-runtime";
 #endif
         std::uint32_t vm_count = 4;
+        bool shared_module = false;
+        bool output_was_set = false;
+        bool runtime_was_set = false;
 
         for (int index = 2; index < argc; ++index) {
             const std::string argument = argv[index];
@@ -81,8 +85,10 @@ int main(const int argc, char** argv) {
             }
             if (argument == "-o") {
                 output_path = argv[++index];
+                output_was_set = true;
             } else if (argument == "--runtime") {
                 runtime_path = argv[++index];
+                runtime_was_set = true;
             } else if (argument == "--vms") {
                 const std::string_view value = argv[++index];
                 const auto result = std::from_chars(
@@ -93,9 +99,26 @@ int main(const int argc, char** argv) {
                     throw std::runtime_error(
                         "--vms must be an integer between 1 and 64");
                 }
+            } else if (argument == "--shared-module") {
+                shared_module = true;
             } else {
                 throw std::runtime_error("unknown argument: " + argument);
             }
+        }
+
+        if (shared_module) {
+#ifdef _WIN32
+            if (!output_was_set) {
+                output_path.replace_extension(".dll");
+            }
+            if (!runtime_was_set) {
+                runtime_path =
+                    compiler_directory / "concept-runtime-shared.dll";
+            }
+#else
+            throw std::runtime_error(
+                "--shared-module is currently supported only on Windows");
+#endif
         }
 
         if (std::filesystem::absolute(source_path).lexically_normal() ==
@@ -106,7 +129,10 @@ int main(const int argc, char** argv) {
         const auto source = read_source(source_path);
         const auto module_root = compiler_directory / "concept";
         const auto bytecode = cpt::compile(source, source_path.string(),
-                                           vm_count, module_root.string());
+                                           vm_count, module_root.string(),
+                                           shared_module
+                                               ? cpt::CompileMode::shared_module
+                                               : cpt::CompileMode::executable);
         const auto image = cpt::serialize(bytecode);
         cpt::package_executable(runtime_path, output_path, image);
         std::cout << "built " << std::filesystem::absolute(output_path).string()

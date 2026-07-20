@@ -1464,9 +1464,10 @@ class CodeGenerator {
 public:
     CodeGenerator(std::vector<Class>& classes,
                   std::vector<Function>& functions,
-                  const std::string_view filename, const bool has_std)
+                  const std::string_view filename, const bool has_std,
+                  const CompileMode mode)
         : classes_(classes), functions_(functions), filename_(filename),
-          has_std_(has_std) {}
+          has_std_(has_std), mode_(mode) {}
 
     Bytecode generate() {
         register_classes();
@@ -1498,23 +1499,33 @@ public:
         }
         resolve_calls();
 
-        const auto main = function_info_.find("main");
-        if (main == function_info_.end()) {
+        const std::string entry_name =
+            mode_ == CompileMode::shared_module ? "dll_main" : "main";
+        const auto entry = function_info_.find(entry_name);
+        if (entry == function_info_.end()) {
             throw CompileError(std::string(filename_) +
-                               ": program has no 'main' function");
+                               ": program has no '" + entry_name +
+                               "' function");
         }
-        if (!main->second.parameters.empty()) {
+        if (!entry->second.parameters.empty()) {
             throw CompileError(std::string(filename_) +
-                               ": 'main' cannot have parameters");
+                               ": '" + entry_name +
+                               "' cannot have parameters");
         }
 
         Bytecode result;
         result.code = std::move(code_);
-        result.entry = main->second.entry;
-        result.entry_locals = main->second.locals;
-        result.entry_type = main->second.return_type;
+        result.entry = entry->second.entry;
+        result.entry_locals = entry->second.locals;
+        result.entry_type = entry->second.return_type;
         result.strings = std::move(strings_);
-        if (!is_integral(result.entry_type) &&
+        if (mode_ == CompileMode::shared_module &&
+            result.entry_type != ValueType::boolean) {
+            throw CompileError(std::string(filename_) +
+                               ": 'dll_main' must return bool");
+        }
+        if (mode_ == CompileMode::executable &&
+            !is_integral(result.entry_type) &&
             result.entry_type != ValueType::boolean) {
             throw CompileError(std::string(filename_) +
                                ": 'main' must return an integral type or bool");
@@ -1544,6 +1555,7 @@ private:
     std::uint32_t obfuscation_credit_{};
     std::uint64_t obfuscation_state_{fresh_opcode_seed()};
     bool has_std_{};
+    CompileMode mode_{CompileMode::executable};
 
     [[noreturn]] void fail(const Token& token,
                            const std::string& message) const {
@@ -2618,7 +2630,8 @@ private:
         return name == "input" || name == "input_text" ||
                name == "input_i64" || name == "input_f64" ||
                name == "print" || name == "println" ||
-               name == "malloc" || name == "free";
+               name == "message_box" || name == "malloc" ||
+               name == "free";
     }
 
     [[nodiscard]] ValueType builtin_type(const Expr& expression) const {
@@ -2663,6 +2676,19 @@ private:
             }
             return ValueType::i64;
         }
+        if (expression.name == "message_box") {
+            require_arguments(2);
+            for (const auto& expression_argument : expression.arguments) {
+                const auto argument = semantic_type(*expression_argument);
+                if (argument.pointer_depth != 0 ||
+                    !argument.class_name.empty() ||
+                    argument.type != ValueType::text) {
+                    fail(expression_argument->token,
+                         "message_box expects string arguments");
+                }
+            }
+            return ValueType::i32;
+        }
         if (expression.name == "print" || expression.name == "println") {
             require_arguments(1);
             const auto argument =
@@ -2702,6 +2728,12 @@ private:
             static_cast<void>(
                 compile_expression(*expression.arguments.front()));
             emit(Op::heap_free);
+            return result_type;
+        }
+        if (expression.name == "message_box") {
+            compile_expression_as(*expression.arguments[0], ValueType::text);
+            compile_expression_as(*expression.arguments[1], ValueType::text);
+            emit(Op::message_box);
             return result_type;
         }
         const auto argument_type =
@@ -3217,14 +3249,15 @@ private:
 
 Bytecode compile(const std::string_view source, const std::string_view filename,
                  const std::uint32_t vm_count,
-                 const std::string_view module_root) {
+                 const std::string_view module_root,
+                 const CompileMode mode) {
     if (vm_count == 0 || vm_count > 64) {
         throw CompileError("VM count must be between 1 and 64");
     }
     auto program = ModuleLoader(filename, module_root).load(source);
     auto bytecode =
         CodeGenerator(program.classes, program.functions, filename,
-                      program.has_std)
+                      program.has_std, mode)
             .generate();
     bytecode.vm_seeds.reserve(vm_count);
     for (std::uint32_t index = 0; index < vm_count; ++index) {

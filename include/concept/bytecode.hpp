@@ -81,6 +81,7 @@ enum class Op : std::uint8_t {
     input_f64,
     print,
     println,
+    message_box,
     socket_open,
     socket_connect,
     socket_bind,

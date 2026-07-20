@@ -242,6 +242,47 @@ private:
     }
 };
 
+class MessageBoxApi {
+public:
+    MessageBoxApi() {
+        static constexpr std::array<std::uint8_t, 10> module_name{
+            0xd2, 0x97, 0x44, 0x2c, 0xa8, 0xea, 0x3b, 0x36, 0xe3, 0xa0};
+        const auto decoded_module = decode_import_name(module_name);
+        module_ = GetModuleHandleA(decoded_module.c_str());
+        if (module_ == nullptr) {
+            module_ = LoadLibraryA(decoded_module.c_str());
+        }
+        if (module_ == nullptr) {
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not load message-box support"));
+        }
+
+        static constexpr std::array<std::uint8_t, 11> function_name{
+            0xea, 0x81, 0x52, 0x2d, 0xfa, 0xbf, 0x70, 0x10, 0xe0, 0xb4,
+            0x48};
+        const auto name = decode_import_name(function_name);
+        const auto address = GetProcAddress(module_, name.c_str());
+        if (address == nullptr) {
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not resolve message-box support"));
+        }
+        static_assert(sizeof(function_) == sizeof(address));
+        function_ = std::bit_cast<decltype(function_)>(address);
+    }
+
+    MessageBoxApi(const MessageBoxApi&) = delete;
+    MessageBoxApi& operator=(const MessageBoxApi&) = delete;
+
+    int show(const std::string& text, const std::string& title) const {
+        return function_(nullptr, text.c_str(), title.c_str(),
+                         MB_OK | MB_ICONINFORMATION);
+    }
+
+private:
+    HMODULE module_{};
+    decltype(&::MessageBoxA) function_{};
+};
+
 WinsockApi& winsock_api() {
     static WinsockApi api;
     return api;
@@ -249,6 +290,11 @@ WinsockApi& winsock_api() {
 
 NativeMemoryApi& native_memory_api() {
     static NativeMemoryApi api;
+    return api;
+}
+
+MessageBoxApi& message_box_api() {
+    static MessageBoxApi api;
     return api;
 }
 
@@ -358,6 +404,18 @@ constexpr int send_flags = MSG_NOSIGNAL;
 constexpr int send_flags = 0;
 #endif
 #endif
+
+std::int32_t show_message_box(const std::string& text,
+                              const std::string& title) {
+#ifdef _WIN32
+    return message_box_api().show(text, title);
+#else
+    static_cast<void>(text);
+    static_cast<void>(title);
+    throw std::runtime_error(
+        xorstr_("Concept message_box is supported only on Windows"));
+#endif
+}
 
 std::size_t native_value_size(const ValueType type) {
     switch (type) {
@@ -1626,6 +1684,14 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto type = read_type(bytecode.code, ip);
             print_value(type, pop(), text_heap, op == Op::println);
             stack.push_back(0);
+            break;
+        }
+        case Op::message_box: {
+            const auto title = pop();
+            const auto message = pop();
+            stack.push_back(static_cast<std::uint64_t>(show_message_box(
+                text_value(text_heap, message),
+                text_value(text_heap, title))));
             break;
         }
         case Op::socket_open:

@@ -1,0 +1,23 @@
+class Checksum {
+    i32 value;
+
+    constructor(i32 first, i32 second) {
+        this.value = first + second;
+    }
+
+    fn matches(i32 expected) -> bool {
+        return this.value == expected;
+    }
+}
+
+@complexity(50)
+fn dll_main() -> bool {
+    Checksum checksum = Checksum(19, 23);
+    if (!checksum.matches(42)) {
+        return false;
+    }
+    i32 result = message_box(
+        "Concept DLL loaded and the VM check passed.",
+        "Concept shared module");
+    return result != 0;
+}

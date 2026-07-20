@@ -48,6 +48,18 @@ target_compile_definitions(concept-runtime PRIVATE
     JM_XORSTR_DISABLE_AVX_INTRINSICS
 )
 
+if(WIN32)
+    add_library(concept-runtime-shared SHARED runtime/dllmain.cpp)
+    target_link_libraries(concept-runtime-shared PRIVATE concept_core)
+    target_compile_definitions(concept-runtime-shared PRIVATE
+        JM_XORSTR_DISABLE_AVX_INTRINSICS
+    )
+    set_target_properties(concept-runtime-shared PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "concept-runtime-shared"
+    )
+endif()
+
 add_executable(concept src/main.cpp)
 target_link_libraries(concept PRIVATE concept_frontend)
 add_custom_target(concept-modules
@@ -56,6 +68,9 @@ add_custom_target(concept-modules
         "$<TARGET_FILE_DIR:concept-runtime>/concept"
 )
 add_dependencies(concept concept-runtime concept-modules)
+if(WIN32)
+    add_dependencies(concept concept-runtime-shared)
+endif()
 
 if(MINGW)
     foreach(target concept-runtime concept)
@@ -71,6 +86,15 @@ foreach(target concept_core concept_frontend concept-runtime concept)
         target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endforeach()
+
+if(WIN32)
+    if(MSVC)
+        target_compile_options(concept-runtime-shared PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(concept-runtime-shared PRIVATE
+            -Wall -Wextra -Wpedantic)
+    endif()
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
@@ -165,4 +189,22 @@ if(BUILD_TESTING)
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-arguments-smoke.exe
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
     )
+    if(WIN32)
+        add_executable(concept-dll-loader tests/dll_loader.cpp)
+        if(MSVC)
+            target_compile_options(concept-dll-loader PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(concept-dll-loader PRIVATE
+                -Wall -Wextra -Wpedantic)
+        endif()
+        add_test(
+            NAME concept-packaged-shared-module
+            COMMAND ${CMAKE_COMMAND}
+                -DCOMPILER=$<TARGET_FILE:concept>
+                -DLOADER=$<TARGET_FILE:concept-dll-loader>
+                -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/shared-module-smoke.concept
+                -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-shared-smoke.dll
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_shared_module.cmake
+        )
+    endif()
 endif()

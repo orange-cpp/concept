@@ -724,6 +724,70 @@ void function_argument_constructor_test() {
     }
 }
 
+void shared_module_entry_test() {
+    constexpr std::string_view source = R"(
+        fn dll_main() -> bool {
+            return true;
+        }
+    )";
+    const auto compiled = cpt::compile(
+        source, "shared-module-test.concept", 8, std::string_view{},
+        cpt::CompileMode::shared_module);
+    expect(compiled.entry_type == cpt::ValueType::boolean,
+           "a shared-module entry point should return bool");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 1,
+           "dll_main should be the serialized shared-module entry point");
+
+    try {
+        static_cast<void>(cpt::compile(
+            "fn main() -> bool { return true; }", "missing-dll-main.concept",
+            4, std::string_view{}, cpt::CompileMode::shared_module));
+        expect(false, "shared modules should require dll_main");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(
+            "fn dll_main() -> i32 { return 1; }", "integer-dll-main.concept",
+            4, std::string_view{}, cpt::CompileMode::shared_module));
+        expect(false, "dll_main should require a bool return type");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(
+            "fn dll_main(u32 reason) -> bool { return true; }",
+            "parameterized-dll-main.concept", 4, std::string_view{},
+            cpt::CompileMode::shared_module));
+        expect(false, "dll_main should not accept parameters");
+    } catch (const cpt::CompileError&) {
+    }
+
+    const auto message_box = cpt::compile(R"(
+        fn main() -> i32 {
+            return message_box("Concept VM is ready.", "Concept");
+        }
+    )", "message-box-test.concept");
+    expect(!cpt::serialize(message_box).empty(),
+           "message_box should compile into serializable bytecode");
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn main() -> i32 { return message_box("missing title"); }
+        )"));
+        expect(false, "message_box should require text and title");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn main() -> i32 { return message_box(42, "Concept"); }
+        )"));
+        expect(false, "message_box arguments should be strings");
+    } catch (const cpt::CompileError&) {
+    }
+}
+
 void dynamic_array_test() {
     const auto source_root =
         std::filesystem::path(__FILE__).parent_path().parent_path();
@@ -1007,6 +1071,7 @@ int main() {
         import_test();
         generic_class_test();
         function_argument_constructor_test();
+        shared_module_entry_test();
         dynamic_array_test();
         http_module_test();
         console_io_test();

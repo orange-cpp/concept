@@ -1,0 +1,3 @@
+fn dll_main() -> bool {
+    return true;
+}

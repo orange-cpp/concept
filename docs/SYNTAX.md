@@ -101,9 +101,26 @@ decorator         = "@complexity(", decimal-integer, ")" ;
 block             = "{", { statement }, "}" ;
 ```
 
-Every program must define a top-level `main` function. `main` must return
-`bool` or an integral type; its result becomes the executable's process exit
-code.
+The required entry point depends on the selected output mode.
+
+| Compiler mode | Required entry | Result |
+|---|---|---|
+| Default executable | `fn main() -> bool` or an integral type | Process exit code |
+| Windows `--shared-module` | `fn dll_main() -> bool` | Worker success status |
+
+Both entry functions must have no parameters. A shared module is packaged with
+`concept-runtime-shared.dll`. During `DLL_PROCESS_ATTACH`, native `DllMain`
+takes a temporary reference to the module, creates a worker thread, closes its
+thread handle, and immediately returns. It does not execute or wait for the VM
+under the loader lock. The worker invokes Concept `dll_main` and atomically
+releases the module reference as it exits, preventing the DLL from unloading
+while Concept code is active.
+
+Initialization is therefore asynchronous. Returning `false` marks the worker
+as failed and writes a debugger diagnostic, but it cannot make the already
+completed `LoadLibrary` call fail. Concept code is not started for thread
+attach, thread detach, or process detach. Operations such as `message_box` and
+sockets run from the worker rather than the native `DllMain` callback.
 
 Functions accept zero or more comma-separated typed parameters and return one
 core type:
@@ -440,7 +457,7 @@ This decorator raises reverse-engineering cost but is not a security boundary.
 Every compilation also independently randomizes opcode numbers for each VM
 context.
 
-## Built-in input and output
+## Built-in input, output, and Windows UI
 
 | Function | Return | Behavior |
 |---|---|---|
@@ -450,10 +467,13 @@ context.
 | `input_f64()` | `f64` | Reads and parses one floating-point line |
 | `print(value)` | `i64` | Prints one core value without a newline |
 | `println(value)` | `i64` | Prints one core value followed by a newline |
+| `message_box(string text, string title)` | `i32` | Shows a Windows information dialog and returns its native result |
 
 Input parse failures stop the VM with an error. `print` and `println` accept
 core values, but not pointers or class objects. Both return `0`, so they can be
-used as expression statements.
+used as expression statements. `message_box` is available only on Windows. It
+resolves its encoded `USER32.dll` and `MessageBoxA` names lazily when executed,
+so binaries that do not use it have no static User32 import.
 
 ## `std::array<T>`
 
