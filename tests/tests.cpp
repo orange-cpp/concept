@@ -88,7 +88,7 @@ void randomized_opcode_test() {
            "each compilation should receive different per-VM opcode seeds");
     expect(first_image != second_image,
            "identical source compilations should produce different bytecode");
-    constexpr std::size_t header_size = 80 + 4 * 16;
+    constexpr std::size_t header_size = 88 + 4 * 16;
     expect(first_image.size() == second_image.size() &&
                !std::equal(first_image.begin() + header_size,
                            first_image.end(),
@@ -108,6 +108,59 @@ void randomized_opcode_test() {
     expect(eight_vms.vm_regions.size() == 8 &&
                cpt::execute(eight_vms) == 42,
            "custom VM counts should preserve shared execution state");
+}
+
+void encoded_bytecode_test() {
+    constexpr std::uint64_t literal = 0x1122334455667788ULL;
+    const auto compiled = cpt::compile(R"(
+        fn main() -> i64 { return 1234605616436508552; }
+    )", "encoded-bytecode.concept", 1);
+    const auto image = cpt::serialize(compiled);
+
+    const auto read_u32 = [&](const std::size_t offset) {
+        std::uint32_t value = 0;
+        for (unsigned byte = 0; byte < 4; ++byte) {
+            value |= static_cast<std::uint32_t>(image[offset + byte])
+                     << (byte * 8);
+        }
+        return value;
+    };
+    const auto region_count = read_u32(32);
+    const auto code_offset = 88 + static_cast<std::size_t>(region_count) * 16;
+    std::array<std::uint8_t, 8> operand{};
+    for (unsigned byte = 0; byte < operand.size(); ++byte) {
+        operand[byte] = static_cast<std::uint8_t>(literal >> (byte * 8));
+    }
+    const auto canonical_operand = std::search(
+        compiled.code.begin(), compiled.code.end(),
+        operand.begin(), operand.end());
+    expect(canonical_operand != compiled.code.end(),
+           "encoded-bytecode test literal should exist in canonical code");
+    if (canonical_operand != compiled.code.end()) {
+        const auto operand_offset = static_cast<std::size_t>(
+            canonical_operand - compiled.code.begin());
+        expect(code_offset + operand_offset + operand.size() <= image.size() &&
+                   !std::equal(
+                       operand.begin(), operand.end(),
+                       image.begin() + static_cast<std::ptrdiff_t>(
+                                           code_offset + operand_offset)),
+               "serialized operand bytes should be rolling-key encoded");
+
+        auto corrupted = image;
+        corrupted[code_offset + operand_offset] ^= 0x80;
+        try {
+            static_cast<void>(cpt::deserialize(corrupted));
+            expect(false,
+                   "corrupted encoded bytecode should fail its checksum");
+        } catch (const std::runtime_error&) {
+        }
+    }
+
+    const auto loaded = cpt::deserialize(image);
+    expect(loaded.code == compiled.code,
+           "rolling-key decoding should restore canonical bytecode");
+    expect(cpt::execute(loaded) == static_cast<std::int64_t>(literal),
+           "rolling-key decoded operands should execute unchanged");
 }
 
 void handler_mutation_test() {
@@ -1165,6 +1218,7 @@ int main() {
         execution_test();
         forward_call_test();
         randomized_opcode_test();
+        encoded_bytecode_test();
         handler_mutation_test();
         complexity_decorator_test();
         class_test();

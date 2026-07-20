@@ -18,7 +18,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 14;
+constexpr std::uint32_t bytecode_version = 15;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -263,6 +263,61 @@ std::uint32_t load_word(const std::uint8_t* bytes) {
            (static_cast<std::uint32_t>(bytes[3]) << 24);
 }
 
+std::uint64_t initial_code_state(
+    const Bytecode::VmRegion& region,
+    const std::array<std::uint8_t, 32>& key,
+    const std::array<std::uint8_t, 12>& nonce) {
+    auto state = region.opcode_seed ^ 0xa0761d6478bd642fULL ^
+                 (static_cast<std::uint64_t>(region.begin) << 32) ^
+                 region.end;
+    for (std::size_t offset = 0; offset < key.size(); offset += 4) {
+        state ^= static_cast<std::uint64_t>(load_word(key.data() + offset))
+                 << ((offset & 4) * 8);
+        static_cast<void>(next_random(state));
+    }
+    for (std::size_t offset = 0; offset < nonce.size(); offset += 4) {
+        state ^= static_cast<std::uint64_t>(load_word(nonce.data() + offset))
+                 << ((offset & 4) * 8);
+        static_cast<void>(next_random(state));
+    }
+    return next_random(state);
+}
+
+void transform_code(
+    std::vector<std::uint8_t>& code,
+    const std::vector<Bytecode::VmRegion>& regions,
+    const std::array<std::uint8_t, 32>& key,
+    const std::array<std::uint8_t, 12>& nonce,
+    const bool encrypting) {
+    for (const auto& region : regions) {
+        auto state = initial_code_state(region, key, nonce);
+        for (std::size_t offset = region.begin; offset < region.end; ++offset) {
+            const auto relative = offset - region.begin;
+            const auto stream = next_random(state);
+            const auto mask = static_cast<std::uint8_t>(
+                stream >> ((relative & 7) * 8));
+            const auto input = code[offset];
+            const auto transformed = static_cast<std::uint8_t>(input ^ mask);
+            const auto ciphertext = encrypting ? transformed : input;
+            code[offset] = transformed;
+            state ^= (static_cast<std::uint64_t>(ciphertext) + 0x100ULL) *
+                     (0xe7037ed1a0b428dbULL + relative);
+            state = std::rotl(state, 13);
+        }
+    }
+}
+
+std::uint64_t code_checksum(
+    const std::span<const std::uint8_t> encrypted_code) {
+    std::uint64_t checksum = 0xcbf29ce484222325ULL;
+    for (const auto byte : encrypted_code) {
+        checksum ^= byte;
+        checksum *= 0x100000001b3ULL;
+        checksum = std::rotl(checksum, 7);
+    }
+    return checksum;
+}
+
 void quarter_round(std::uint32_t& a, std::uint32_t& b, std::uint32_t& c,
                    std::uint32_t& d) {
     a += b;
@@ -374,9 +429,12 @@ std::vector<std::uint8_t> serialize(const Bytecode& bytecode) {
         throw std::runtime_error(
             xorstr_("too many VM regions in Concept bytecode"));
     }
-    const auto encoded_code = encode_opcodes(bytecode.code, regions);
+    auto encoded_code = encode_opcodes(bytecode.code, regions);
+    transform_code(encoded_code, regions, bytecode.string_key,
+                   bytecode.string_nonce, true);
+    const auto encoded_code_checksum = code_checksum(encoded_code);
 
-    constexpr std::size_t header_size = 80;
+    constexpr std::size_t header_size = 88;
     constexpr std::size_t region_size = 16;
     std::vector<std::uint8_t> output;
     output.reserve(header_size + regions.size() * region_size +
@@ -393,6 +451,7 @@ std::vector<std::uint8_t> serialize(const Bytecode& bytecode) {
                   bytecode.string_key.end());
     output.insert(output.end(), bytecode.string_nonce.begin(),
                   bytecode.string_nonce.end());
+    append_u64(output, encoded_code_checksum);
     for (const auto& region : regions) {
         append_u32(output, region.begin);
         append_u32(output, region.end);
@@ -412,7 +471,7 @@ std::vector<std::uint8_t> serialize(const Bytecode& bytecode) {
 }
 
 Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
-    constexpr std::size_t header_size = 80;
+    constexpr std::size_t header_size = 88;
     constexpr std::size_t region_size = 16;
     if (bytes.size() < header_size ||
         !std::equal(bytecode_magic.begin(), bytecode_magic.end(), bytes.begin())) {
@@ -442,6 +501,7 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
                 bytecode.string_key.begin());
     std::copy_n(bytes.begin() + 68, bytecode.string_nonce.size(),
                 bytecode.string_nonce.begin());
+    const auto expected_code_checksum = read_u64(bytes, 80);
 
     std::size_t cursor = header_size;
     if (vm_count == 0 || vm_count > (bytes.size() - cursor) / region_size) {
@@ -468,8 +528,16 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
         throw std::runtime_error(
             xorstr_("invalid Concept bytecode image size"));
     }
-    bytecode.code = decode_opcodes(bytes.subspan(cursor, code_size),
-                                   bytecode.vm_regions);
+    std::vector<std::uint8_t> encoded_code(
+        bytes.begin() + static_cast<std::ptrdiff_t>(cursor),
+        bytes.begin() + static_cast<std::ptrdiff_t>(cursor + code_size));
+    if (code_checksum(encoded_code) != expected_code_checksum) {
+        throw std::runtime_error(
+            xorstr_("Concept encoded bytecode checksum mismatch"));
+    }
+    transform_code(encoded_code, bytecode.vm_regions,
+                   bytecode.string_key, bytecode.string_nonce, false);
+    bytecode.code = decode_opcodes(encoded_code, bytecode.vm_regions);
     cursor += code_size;
     if (string_count > (bytes.size() - cursor) / 4) {
         throw std::runtime_error(

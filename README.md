@@ -248,13 +248,17 @@ the instruction set can evolve deliberately.
 
 Every compiler invocation divides code into instruction-aligned VM regions.
 Each region receives a separate opcode-layout seed that shuffles instruction
-bytes to unique values across the full `0..255` range. The runtime reconstructs
-each inverse mapping, validates the regions, and cooperatively switches the
-active VM context as control flow crosses region boundaries. Contexts own their
-code regions while sharing the operand stack, call frames, locals, and string
-heap. Compiling identical source twice therefore produces different bytecode.
-This is an obfuscation layer, not encryption: the executable necessarily
-contains enough information for its VMs to recover their mappings.
+bytes to unique values across the full `0..255` range. It then transforms every
+opcode and operand byte with a per-region rolling key derived from the image key,
+nonce, region boundaries, and VM seed. Each ciphertext byte feeds the next key
+state, and a checksum rejects damaged encoded code before decoding. The runtime
+reverses the rolling transform, reconstructs each inverse opcode mapping,
+validates the regions, and cooperatively switches the active VM context as
+control flow crosses region boundaries. Contexts own their code regions while
+sharing the operand stack, call frames, locals, and string heap. Compiling
+identical source twice therefore produces different encoded bytecode. The key
+material must remain recoverable from the executable, so this is an obfuscation
+boundary rather than secret-key encryption.
 
 The same per-VM seeds also select handler mutations independently for every
 opcode. Four precompiled handler shapes vary operand extraction and argument

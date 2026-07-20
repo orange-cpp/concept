@@ -466,6 +466,13 @@ calculations. Handler selection changes across compilations automatically and
 does not require a decorator. The runtime contains every precompiled shape, so
 this is execution-path obfuscation rather than native machine-code mutation.
 
+Serialized bytecode also encodes every opcode and operand with per-VM rolling
+keys. A ciphertext byte changes the key state used for the next byte, and the
+runtime verifies a checksum before reversing the transform and randomized opcode
+mapping. This encoding is automatic at every complexity level. Its key material
+is stored in recoverable form in the packaged program, so it hides static
+plaintext patterns but is not secret-key protection.
+
 ## Built-in input and output
 
 | Function | Return | Behavior |
