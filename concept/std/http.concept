@@ -1,0 +1,60 @@
+// Concept-only HTTP/1.0 client built on std::Socket.
+//
+// Import as `import std::http;` and use `std::http`.
+// The raw first response block is stored in `response`.
+
+import std::socket;
+
+class std::http {
+    string host;
+    string path;
+    u16 port;
+    string response;
+
+    fn get() -> bool {
+        this.response = "";
+        if (this.host == "") {
+            return false;
+        }
+        if (this.path == "") {
+            this.path = "/";
+        }
+        if (this.port == u16(0)) {
+            this.port = u16(80);
+        }
+
+        std::Socket connection = std::Socket();
+        if (!connection.valid()) {
+            return false;
+        }
+        if (!connection.connect(this.host, this.port)) {
+            connection.close();
+            return false;
+        }
+
+        if (connection.send("GET ") == -1) {
+            connection.close();
+            return false;
+        }
+        if (connection.send(this.path) == -1) {
+            connection.close();
+            return false;
+        }
+        if (connection.send(" HTTP/1.0\r\nHost: ") == -1) {
+            connection.close();
+            return false;
+        }
+        if (connection.send(this.host) == -1) {
+            connection.close();
+            return false;
+        }
+        if (connection.send("\r\nConnection: close\r\nUser-Agent: concept/0.1\r\nAccept: */*\r\n\r\n") == -1) {
+            connection.close();
+            return false;
+        }
+
+        this.response = connection.recv();
+        connection.close();
+        return this.response != "";
+    }
+}

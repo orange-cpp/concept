@@ -63,6 +63,7 @@ enum class Op : std::uint8_t {
     jump_if_false,
     call,
     call_method,
+    call_constructor,
     new_object,
     load_field,
     store_field,

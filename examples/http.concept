@@ -1,0 +1,17 @@
+import std::http;
+
+@complexity(50)
+fn main() -> int {
+    std::http request;
+    request.host = "31.77.131.25";
+    request.path = "/";
+    request.port = u16(80);
+
+    if (!request.get()) {
+        println("HTTP request failed.");
+        return 1;
+    }
+
+    print(request.response);
+    return 42;
+}

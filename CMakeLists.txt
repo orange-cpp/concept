@@ -157,4 +157,12 @@ if(BUILD_TESTING)
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-dynamic-array-smoke.exe
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
     )
+    add_test(
+        NAME concept-packaged-arguments
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/arguments.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-arguments-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
 endif()

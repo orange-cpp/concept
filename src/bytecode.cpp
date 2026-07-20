@@ -18,7 +18,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 10;
+constexpr std::uint32_t bytecode_version = 11;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -82,7 +82,8 @@ std::size_t operand_size(const Op op) {
         return 4;
     case Op::call:
     case Op::call_method:
-        return 8;
+    case Op::call_constructor:
+        return 10;
     case Op::add:
     case Op::subtract:
     case Op::multiply:
@@ -567,7 +568,7 @@ void validate(const Bytecode& bytecode) {
         }
 
         if (op == Op::jump || op == Op::jump_if_false || op == Op::call ||
-            op == Op::call_method) {
+            op == Op::call_method || op == Op::call_constructor) {
             targets.push_back(read_u32(bytecode.code, offset));
         }
         offset += size;

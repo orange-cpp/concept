@@ -43,6 +43,7 @@ struct Frame {
     std::size_t return_ip{};
     std::size_t stack_base{};
     std::vector<std::uint64_t> locals;
+    std::uint64_t constructor_result{};
 };
 
 struct PointerTarget {
@@ -1566,33 +1567,46 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::call: {
             const auto target = read_u32(bytecode.code, ip);
             const auto local_count = read_u32(bytecode.code, ip);
+            const auto argument_count = read_u16(bytecode.code, ip);
             if (frames.size() >= maximum_call_depth) {
                 throw std::runtime_error(
                     xorstr_("Concept VM call stack overflow"));
             }
-            frames.push_back(
-                {next_frame_id++, ip, stack.size(),
-                 std::vector<std::uint64_t>(local_count, 0)});
+            if (argument_count > local_count) {
+                throw std::runtime_error(xorstr_(
+                    "Concept VM call has more arguments than locals"));
+            }
+            std::vector<std::uint64_t> function_locals(local_count, 0);
+            for (std::size_t index = argument_count; index != 0; --index) {
+                function_locals[index - 1] = pop();
+            }
+            frames.push_back({next_frame_id++, ip, stack.size(),
+                              std::move(function_locals)});
             ip = target;
             break;
         }
-        case Op::call_method: {
+        case Op::call_method:
+        case Op::call_constructor: {
             const auto target = read_u32(bytecode.code, ip);
             const auto local_count = read_u32(bytecode.code, ip);
-            const auto receiver = pop();
+            const auto argument_count = read_u16(bytecode.code, ip);
             if (frames.size() >= maximum_call_depth) {
                 throw std::runtime_error(
                     xorstr_("Concept VM call stack overflow"));
             }
-            if (local_count == 0) {
+            if (local_count == 0 || argument_count >= local_count) {
                 throw std::runtime_error(
-                    xorstr_("Concept VM method has no receiver local"));
+                    xorstr_("Concept VM method call local layout is invalid"));
             }
             std::vector<std::uint64_t> method_locals(local_count, 0);
+            for (std::size_t index = argument_count; index != 0; --index) {
+                method_locals[index] = pop();
+            }
+            const auto receiver = pop();
             method_locals[0] = receiver;
-            frames.push_back(
-                {next_frame_id++, ip, stack.size(),
-                 std::move(method_locals)});
+            frames.push_back({next_frame_id++, ip, stack.size(),
+                              std::move(method_locals),
+                              op == Op::call_constructor ? receiver : 0});
             ip = target;
             break;
         }
@@ -1663,12 +1677,15 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto result = pop();
             const auto stack_base = frames.back().stack_base;
             const auto return_ip = frames.back().return_ip;
+            const auto constructor_result =
+                frames.back().constructor_result;
             stack.resize(stack_base);
             frames.pop_back();
             if (frames.empty()) {
                 return exit_value(bytecode.entry_type, result);
             }
-            stack.push_back(result);
+            stack.push_back(constructor_result == 0 ? result
+                                                    : constructor_result);
             ip = return_ip;
             break;
         }

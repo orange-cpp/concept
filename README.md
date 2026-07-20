@@ -104,7 +104,8 @@ The bootstrap subset supports:
 - owned `string` values and escaped string literals;
 - integer, floating-point, string, `true`, and `false` literals;
 - explicit casts such as `u8(value)`, `f64(value)`, and `bool(value)`;
-- no-argument typed functions, including forward calls and recursion;
+- typed functions with multiple arguments, including forward calls and
+  recursion;
 - typed local variables, assignment, blocks, `if`/`else`, and `while`;
 - `+`, `-`, `*`, `/`, `%`, unary `-` and `!`;
 - `==`, `!=`, `<`, `<=`, `>`, and `>=`;
@@ -113,8 +114,9 @@ The bootstrap subset supports:
 - `print(value)` and `println(value)` for every core value type;
 - `//` line comments.
 - qualified top-level imports such as `import std::socket;`.
-- classes with core-type fields, automatic construction, `object.field`
-  access, reference-style assignment, no-argument methods, and `this`;
+- classes with core-type fields, optional constructors, automatic
+  zero-argument construction, `object.field` access, reference-style
+  assignment, methods with multiple arguments, and `this`;
 - typed pointers with `T*`, address-of `&`, dereference `*`, indirect
   assignment, pointer-to-pointer values, and pointers to locals or fields;
 
@@ -125,13 +127,14 @@ instructions to that function. `@complexty(level)` is also accepted as an
 alias for compatibility with the original spelling. The calculator example
 uses level `100`.
 
-Class instances are created with `Counter()` or automatically by an
-uninitialized declaration such as `Counter value;`. Assignment shares the same
-object, so mutations through an alias are visible through every reference. A
-method accesses its receiver through `this`, including calls such as
-`this.increment()`. Fields currently use core types, and methods follow the
-current no-argument user-function model. Constructors, method parameters,
-inheritance, and visibility modifiers are not implemented yet.
+Class instances are created with calls such as `Counter(42)`. A class may
+declare one `constructor(...)`; inside it and every method, `this` is the
+receiver object. Uninitialized declarations such as `Counter value;` construct
+automatically only when no constructor arguments are required. Assignment
+shares the same object, so mutations through an alias are visible through every
+reference. Functions, methods, and constructors accept comma-separated typed
+parameters. Multiple constructors, overloading, inheritance, and visibility
+modifiers are not implemented yet.
 
 Pointers use C-style syntax:
 
@@ -156,9 +159,9 @@ native address space. Its address expression must be integral, and `T` may be a
 numeric or `bool` core type. On Windows, native reads and writes are checked and
 produce a VM error when the requested memory is inaccessible. The programmer is
 still responsible for using a correct live address and matching value type.
-Native `string` and class pointers are not supported. Pointer arithmetic,
-general pointer casts, pointer function parameters/returns, and arrays are not
-implemented yet.
+Native `string` and class pointers are not supported. Pointer arithmetic and
+pointer parameters are supported; general pointer casts and pointer function
+returns are not implemented yet.
 
 Strings currently support storage, function returns, printing, and `==`/`!=`.
 Concatenation, indexing, and conversion between strings and numeric values are

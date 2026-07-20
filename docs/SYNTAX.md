@@ -87,12 +87,16 @@ local-type        = ( core-type | qualified-identifier
                     | generic-class-type ), { "*" } ;
 class-declaration = "class", qualified-identifier,
                     [ "<", identifier, ">" ], "{",
-                    { field-declaration | function-declaration }, "}" ;
+                    { field-declaration | constructor-declaration
+                    | function-declaration }, "}" ;
 field-declaration = ( core-type | generic-parameter ),
                     { "*" }, identifier, ";" ;
+constructor-declaration = "constructor", "(", [ parameters ], ")", block ;
 function-declaration = { decorator }, "fn", identifier,
-                       "(", ")", "->",
+                       "(", [ parameters ], ")", "->",
                        ( core-type | generic-parameter ), block ;
+parameters        = parameter, { ",", parameter } ;
+parameter         = local-type, identifier ;
 decorator         = "@complexity(", decimal-integer, ")" ;
 block             = "{", { statement }, "}" ;
 ```
@@ -101,21 +105,26 @@ Every program must define a top-level `main` function. `main` must return
 `bool` or an integral type; its result becomes the executable's process exit
 code.
 
-Functions currently have no parameters and return one core type:
+Functions accept zero or more comma-separated typed parameters and return one
+core type:
 
 ```c
-fn answer() -> i32 {
-    return 42;
+fn add(i32 left, i32 right) -> i32 {
+    return left + right;
 }
 
 fn main() -> int {
-    return answer();
+    return add(19, 23);
 }
 ```
 
 Calls may refer to functions declared later in the merged program. Reaching the
 end of a function without `return` returns that function's default value.
-Pointer, class, and no-value return types are not currently available.
+Parameters may be core values, pointers, class objects, or concrete generic
+class specializations. Arguments use the same numeric conversions as
+assignment; pointer and class arguments must have matching types. Calls require
+the exact declared argument count. Pointer, class, and no-value return types are
+not currently available.
 
 ## Variables and assignment
 
@@ -315,32 +324,37 @@ class pointers are not supported.
 `ptr_cast` is intentionally explicit because native memory access bypasses the
 safety of normal VM references. Element-scaled pointer arithmetic and indexing
 work on native pointers. Pointer comparisons, general pointer-to-pointer casts,
-and pointer function parameters or returns are not implemented yet.
+and pointer function returns are not implemented yet.
 
 ## Classes
 
-Classes contain core fields and no-argument methods:
+Classes contain fields, methods, and optionally one constructor:
 
 ```c
 class Counter {
     i32 value;
 
-    fn increment() -> int {
-        this.value = this.value + 1;
+    constructor(i32 initial) {
+        this.value = initial;
+    }
+
+    fn increment(i32 amount) -> int {
+        this.value = this.value + amount;
         return this.value;
     }
 }
 
 fn main() -> int {
-    Counter counter = Counter();
-    counter.value = 41;
-    return counter.increment();
+    Counter counter = Counter(40);
+    return counter.increment(2);
 }
 ```
 
-Inside a method, `this` is the receiver object. A class can be constructed with
-`ClassName()` or by declaring a class local without an initializer. Constructors
-do not accept arguments.
+Inside a method or constructor, `this` is the receiver object. A class can be
+constructed with `ClassName(arguments)`. A class local without an initializer
+is constructed automatically when the class has no constructor or declares a
+zero-argument constructor. A constructor that requires arguments must be called
+explicitly. Constructors have no return type and cannot return a value.
 
 Class assignment shares the same object rather than copying its fields:
 
@@ -351,18 +365,23 @@ alias.value = 42;
 // first.value is now 42 too.
 ```
 
-Methods return core values and currently take no parameters. Class-valued
-fields, user-defined constructors, inheritance, visibility modifiers, static
-members, and method overloading are not implemented.
+Methods accept the same parameter types as top-level functions and return core
+values. Class-valued fields, inheritance, visibility modifiers, static members,
+multiple constructors, and method overloading are not implemented.
 
 ## Generic classes
 
 A class may declare one generic type parameter and use it for fields, pointer
-fields, locals, fixed arrays, and method return values:
+fields, locals, fixed arrays, parameters, constructor parameters, and method
+return values:
 
 ```c
 class Box<T> {
     T value;
+
+    constructor(T initial) {
+        this.value = initial;
+    }
 
     fn get() -> T {
         return this.value;
@@ -370,8 +389,7 @@ class Box<T> {
 }
 
 fn main() -> int {
-    Box<float> box;
-    box.value = 42.0;
+    Box<float> box = Box<float>(42.0);
     return i32(box.get());
 }
 ```
@@ -457,9 +475,9 @@ fn main() -> int {
 }
 ```
 
-Concept does not have method parameters yet, so `value` supplies a `T` argument
-and `index` supplies a `u64` argument before an operation. The container also
-exposes its current `length` and `capacity` fields.
+This standard-library class retains its field-based interface: `value` supplies
+a `T` argument and `index` supplies a `u64` argument before an operation. The
+container also exposes its current `length` and `capacity` fields.
 
 | Method | Return | Meaning |
 |---|---|---|
@@ -476,6 +494,40 @@ exposes its current `length` and `capacity` fields.
 There is no automatic destructor yet, so call `destroy()` when the container is
 no longer needed. Its growth, copying, indexing, and cleanup are defined in
 `concept/std/array.concept`; the VM has no special dynamic-array implementation.
+
+## `std::http`
+
+`std::http` is an HTTP/1.0 GET client implemented in Concept on top of
+`std::Socket`. Importing it automatically imports the socket module:
+
+```c
+import std::http;
+
+fn main() -> int {
+    std::http request;
+    request.host = "example.com";
+    request.path = "/";
+    request.port = u16(80);
+
+    if (!request.get()) {
+        return 1;
+    }
+    print(request.response);
+    return 0;
+}
+```
+
+Set `host`, `path`, and `port`, then call `get()`. An empty path defaults to
+`"/"`, and port `0` defaults to port `80`. `get()` returns whether a non-empty
+response was received and places the raw HTTP response in `response`. Hostnames
+are resolved by the underlying socket connection.
+
+The current socket receive operation returns at most 4096 bytes, so
+`response` contains the first response block. The module does not yet decode
+headers, redirects, chunked transfer encoding, or content encodings. HTTPS is
+not supported because the standard library does not yet provide TLS. All HTTP
+request formatting and control flow are defined in `concept/std/http.concept`;
+the VM contains no HTTP-specific implementation.
 
 ## `std::Socket`
 
@@ -517,6 +569,12 @@ This grammar summarizes the parser. Semantic type restrictions described above
 still apply.
 
 ```ebnf
+parameter      = local-type, identifier ;
+parameters     = parameter, { ",", parameter } ;
+function       = { decorator }, "fn", identifier,
+                 "(", [ parameters ], ")", "->", return-type, block ;
+constructor    = "constructor", "(", [ parameters ], ")", block ;
+
 statement      = block
                | local-type, identifier,
                  [ "[", integer-literal, "]" | "=", expression ], ";"
@@ -552,7 +610,7 @@ arguments      = expression, { ",", expression } ;
 
 The current language does not yet provide:
 
-- function or user-method parameters;
+- default arguments, variadic parameters, or function/method overloading;
 - generic functions, multiple generic parameters, or non-core generic
   arguments;
 - pointer, class, or `void` function returns;
@@ -561,8 +619,8 @@ The current language does not yet provide:
 - logical short-circuit, bitwise, compound-assignment, increment, decrement, or
   ternary operators;
 - string concatenation, indexing, or numeric conversion;
-- constructors with arguments, class-valued fields, inheritance, visibility,
-  static members, or overloading;
+- multiple constructors, class-valued fields, inheritance, visibility, or
+  static members;
 - pointer comparison or general pointer casts.
 
 These omissions are syntax errors or compile-time type errors rather than

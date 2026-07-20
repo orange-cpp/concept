@@ -1,0 +1,23 @@
+class Range {
+    i32 first;
+    i32 last;
+
+    constructor(i32 first, i32 last) {
+        this.first = first;
+        this.last = last;
+    }
+
+    fn sum(i32 offset) -> i32 {
+        return this.first + this.last + offset;
+    }
+}
+
+fn add(i32 first, i32 second, i32 third) -> i32 {
+    return first + second + third;
+}
+
+@complexity(50)
+fn main() -> int {
+    Range values = Range(10, 20);
+    return add(values.sum(5), 3, 4);
+}

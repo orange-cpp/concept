@@ -33,6 +33,7 @@ enum class TokenKind {
     string_literal,
     import_kw,
     class_kw,
+    constructor_kw,
     fn_kw,
     type_kw,
     return_kw,
@@ -245,6 +246,8 @@ public:
                 kind = TokenKind::import_kw;
             } else if (text == "class") {
                 kind = TokenKind::class_kw;
+            } else if (text == "constructor") {
+                kind = TokenKind::constructor_kw;
             } else if (text == "fn") {
                 kind = TokenKind::fn_kw;
             } else if (is_type_name(text)) {
@@ -499,11 +502,21 @@ struct Stmt {
 };
 
 struct Function {
+    struct Parameter {
+        Token name;
+        ValueType type{ValueType::i64};
+        bool template_type{};
+        std::uint8_t pointer_depth{};
+        std::string class_name;
+    };
+
     Token name;
     ValueType return_type{ValueType::i64};
     bool return_template_type{};
     std::uint8_t complexity{};
     std::string class_name;
+    bool constructor{};
+    std::vector<Parameter> parameters;
     std::vector<std::unique_ptr<Stmt>> body;
 };
 
@@ -518,6 +531,7 @@ struct Class {
     Token name;
     std::string template_parameter;
     std::vector<Field> fields;
+    std::unique_ptr<Function> constructor;
     std::vector<Function> methods;
 };
 
@@ -596,6 +610,56 @@ private:
                            std::string(message));
     }
 
+    Function::Parameter parse_parameter() {
+        Function::Parameter parameter;
+        const auto type = current_;
+        if (current_.kind == TokenKind::type_kw) {
+            parameter.type = value_type_from_name(current_.text);
+            advance();
+        } else if (!active_template_parameter_.empty() &&
+                   current_.kind == TokenKind::identifier &&
+                   current_.text == active_template_parameter_) {
+            parameter.template_type = true;
+            advance();
+        } else if (current_.kind == TokenKind::identifier) {
+            parameter.type = ValueType::u64;
+            parameter.class_name = current_.text;
+            advance();
+            if (match(TokenKind::less)) {
+                const auto argument = consume(
+                    TokenKind::type_kw,
+                    "expected a core generic type argument");
+                parameter.class_name +=
+                    "<" + std::string(value_type_name(
+                              value_type_from_name(argument.text))) +
+                    ">";
+                consume(TokenKind::greater,
+                        "expected '>' after generic type argument");
+            }
+        } else {
+            fail(current_, "expected parameter type");
+        }
+        while (match(TokenKind::star)) {
+            if (parameter.pointer_depth ==
+                std::numeric_limits<std::uint8_t>::max()) {
+                fail(type, "pointer type has too many indirections");
+            }
+            ++parameter.pointer_depth;
+        }
+        parameter.name =
+            consume(TokenKind::identifier, "expected parameter name");
+        return parameter;
+    }
+
+    void parse_parameters(Function& function) {
+        if (current_.kind == TokenKind::right_paren) {
+            return;
+        }
+        do {
+            function.parameters.push_back(parse_parameter());
+        } while (match(TokenKind::comma));
+    }
+
     Function parse_function(const std::string_view class_name = {}) {
         Function function;
         function.class_name = class_name;
@@ -635,8 +699,8 @@ private:
         function.name =
             consume(TokenKind::identifier, "expected function name");
         consume(TokenKind::left_paren, "expected '('");
-        consume(TokenKind::right_paren,
-                "function parameters are not supported yet; expected ')'");
+        parse_parameters(function);
+        consume(TokenKind::right_paren, "expected ')' after parameters");
         consume(TokenKind::arrow, "expected '->'");
         if (!active_template_parameter_.empty() &&
             current_.kind == TokenKind::identifier &&
@@ -649,6 +713,22 @@ private:
             function.return_type = value_type_from_name(return_type.text);
         }
         function.body = parse_block_contents();
+        return function;
+    }
+
+    std::unique_ptr<Function> parse_constructor(
+        const std::string_view class_name) {
+        auto function = std::make_unique<Function>();
+        function->name = consume(TokenKind::constructor_kw,
+                                 "expected 'constructor'");
+        function->class_name = class_name;
+        function->constructor = true;
+        consume(TokenKind::left_paren,
+                "expected '(' after constructor");
+        parse_parameters(*function);
+        consume(TokenKind::right_paren,
+                "expected ')' after constructor parameters");
+        function->body = parse_block_contents();
         return function;
     }
 
@@ -670,6 +750,14 @@ private:
         consume(TokenKind::left_brace, "expected '{' after class name");
         while (current_.kind != TokenKind::right_brace &&
                current_.kind != TokenKind::end) {
+            if (current_.kind == TokenKind::constructor_kw) {
+                if (declaration.constructor) {
+                    fail(current_, "class has more than one constructor");
+                }
+                declaration.constructor =
+                    parse_constructor(declaration.name.text);
+                continue;
+            }
             const bool is_template_type =
                 !active_template_parameter_.empty() &&
                 current_.kind == TokenKind::identifier &&
@@ -1324,10 +1412,17 @@ private:
     }
 };
 
+struct SemanticType {
+    ValueType type{ValueType::i64};
+    std::string class_name;
+    std::uint8_t pointer_depth{};
+};
+
 struct FunctionInfo {
     std::uint32_t entry{};
     std::uint32_t locals{};
     ValueType return_type{ValueType::i64};
+    std::vector<SemanticType> parameters;
 };
 
 struct LocalInfo {
@@ -1344,16 +1439,11 @@ struct FieldInfo {
     std::uint8_t pointer_depth{};
 };
 
-struct SemanticType {
-    ValueType type{ValueType::i64};
-    std::string class_name;
-    std::uint8_t pointer_depth{};
-};
-
 struct ClassInfo {
     std::uint16_t field_count{};
     std::unordered_map<std::string, FieldInfo> fields;
     std::unordered_map<std::string, std::string> methods;
+    std::string constructor;
     bool native_socket{};
 };
 
@@ -1388,11 +1478,19 @@ public:
             if (!declaration.template_parameter.empty()) {
                 continue;
             }
+            if (declaration.constructor) {
+                compile_function(*declaration.constructor);
+            }
             for (const auto& method : declaration.methods) {
                 compile_function(method);
             }
         }
         for (const auto& specialization : generic_specializations_) {
+            if (specialization.declaration->constructor) {
+                compile_function(*specialization.declaration->constructor,
+                                 specialization.name,
+                                 specialization.argument);
+            }
             for (const auto& method : specialization.declaration->methods) {
                 compile_function(method, specialization.name,
                                  specialization.argument);
@@ -1404,6 +1502,10 @@ public:
         if (main == function_info_.end()) {
             throw CompileError(std::string(filename_) +
                                ": program has no 'main' function");
+        }
+        if (!main->second.parameters.empty()) {
+            throw CompileError(std::string(filename_) +
+                               ": 'main' cannot have parameters");
         }
 
         Bytecode result;
@@ -1437,6 +1539,7 @@ private:
     ValueType current_return_type_{ValueType::i64};
     std::string current_class_;
     std::optional<ValueType> current_template_type_;
+    bool current_is_constructor_{};
     std::uint8_t current_complexity_{};
     std::uint32_t obfuscation_credit_{};
     std::uint64_t obfuscation_state_{fresh_opcode_seed()};
@@ -1469,6 +1572,28 @@ private:
         }
         return std::pair{name.substr(0, open),
                          value_type_from_name(argument)};
+    }
+
+    SemanticType resolve_parameter_type(
+        const Function::Parameter& parameter,
+        const std::optional<ValueType> argument) const {
+        if (parameter.template_type && !argument) {
+            fail(parameter.name,
+                 "generic parameter type requires a specialization");
+        }
+        return {parameter.template_type ? *argument : parameter.type,
+                parameter.class_name, parameter.pointer_depth};
+    }
+
+    std::vector<SemanticType> resolve_parameters(
+        const Function& function,
+        const std::optional<ValueType> argument = std::nullopt) const {
+        std::vector<SemanticType> result;
+        result.reserve(function.parameters.size());
+        for (const auto& parameter : function.parameters) {
+            result.push_back(resolve_parameter_type(parameter, argument));
+        }
+        return result;
     }
 
     void register_concrete_class(const Class& declaration,
@@ -1506,6 +1631,9 @@ private:
                 fail(method.name,
                      "duplicate method '" + method.name.text + "'");
             }
+        }
+        if (declaration.constructor) {
+            info.constructor = name + ".constructor";
         }
         if (!class_info_.emplace(name, std::move(info)).second) {
             fail(declaration.name, "duplicate class '" + name + "'");
@@ -1591,6 +1719,10 @@ private:
         }
 
         const auto collect_function = [&](const Function& function) {
+            for (const auto& parameter : function.parameters) {
+                register_generic_use(parameter.class_name,
+                                     parameter.name);
+            }
             for (const auto& statement : function.body) {
                 collect_generic_statement(*statement);
             }
@@ -1599,6 +1731,9 @@ private:
             collect_function(function);
         }
         for (const auto& declaration : classes_) {
+            if (declaration.constructor) {
+                collect_function(*declaration.constructor);
+            }
             for (const auto& method : declaration.methods) {
                 collect_function(method);
             }
@@ -1607,6 +1742,32 @@ private:
             register_concrete_class(*specialization.declaration,
                                     specialization.name,
                                     specialization.argument);
+        }
+    }
+
+    void register_function_signature(
+        const Function& function, const std::string& key,
+        const ValueType return_type,
+        const std::optional<ValueType> template_type = std::nullopt) {
+        auto parameters = resolve_parameters(function, template_type);
+        std::unordered_set<std::string> names;
+        for (std::size_t index = 0; index < parameters.size(); ++index) {
+            const auto& parameter = function.parameters[index];
+            if (parameter.name.text == "this" ||
+                !names.insert(parameter.name.text).second) {
+                fail(parameter.name,
+                     "duplicate parameter '" + parameter.name.text + "'");
+            }
+            if (!parameters[index].class_name.empty()) {
+                lookup_class(parameter.name,
+                             parameters[index].class_name);
+            }
+        }
+        if (!function_info_
+                 .emplace(key, FunctionInfo{0, 0, return_type,
+                                            std::move(parameters)})
+                 .second) {
+            fail(function.name, "duplicate function '" + key + "'");
         }
     }
 
@@ -1621,32 +1782,40 @@ private:
                 fail(function.name,
                      "function conflicts with class '" + name + "'");
             }
-            if (!function_info_
-                     .emplace(name,
-                              FunctionInfo{0, 0, function.return_type})
-                     .second) {
-                fail(function.name, "duplicate function '" + name + "'");
-            }
+            register_function_signature(function, name,
+                                        function.return_type);
         }
         for (const auto& declaration : classes_) {
             if (!declaration.template_parameter.empty()) {
                 continue;
             }
+            if (declaration.constructor) {
+                register_function_signature(
+                    *declaration.constructor,
+                    declaration.name.text + ".constructor",
+                    ValueType::i64);
+            }
             for (const auto& method : declaration.methods) {
                 const auto key = function_key(method);
-                function_info_.emplace(
-                    key, FunctionInfo{0, 0, method.return_type});
+                register_function_signature(method, key,
+                                            method.return_type);
             }
         }
         for (const auto& specialization : generic_specializations_) {
+            if (specialization.declaration->constructor) {
+                register_function_signature(
+                    *specialization.declaration->constructor,
+                    specialization.name + ".constructor",
+                    ValueType::i64, specialization.argument);
+            }
             for (const auto& method : specialization.declaration->methods) {
                 const auto key =
                     specialization.name + "." + method.name.text;
                 const auto return_type = method.return_template_type
                                              ? specialization.argument
                                              : method.return_type;
-                function_info_.emplace(
-                    key, FunctionInfo{0, 0, return_type});
+                register_function_signature(method, key, return_type,
+                                            specialization.argument);
             }
         }
     }
@@ -1672,12 +1841,28 @@ private:
                                    ? *template_type
                                    : function.return_type;
         current_class_ = class_name;
+        current_is_constructor_ = function.constructor;
         current_complexity_ = function.complexity;
         obfuscation_credit_ = 0;
         locals_.clear();
         if (!current_class_.empty()) {
             locals_.emplace(
                 "this", LocalInfo{0, ValueType::u64, current_class_, 0});
+        }
+        for (std::size_t index = 0; index < function.parameters.size();
+             ++index) {
+            const auto& parameter = function.parameters[index];
+            const auto& type = info.parameters[index];
+            if (locals_.size() >=
+                std::numeric_limits<std::uint16_t>::max()) {
+                fail(parameter.name, "too many parameters");
+            }
+            const auto local_index =
+                static_cast<std::uint16_t>(locals_.size());
+            locals_.emplace(parameter.name.text,
+                            LocalInfo{local_index, type.type,
+                                      type.class_name,
+                                      type.pointer_depth});
         }
         if (current_complexity_ != 0) {
             emit_obfuscation_layer();
@@ -1761,7 +1946,8 @@ private:
                     compile_object_expression_as(*statement.expression,
                                                  statement.class_name);
                 } else {
-                    emit_new_object(statement.class_name);
+                    emit_construct_object(statement.class_name,
+                                          statement.token, nullptr);
                 }
             } else if (statement.expression) {
                 compile_expression_as(*statement.expression,
@@ -1841,6 +2027,10 @@ private:
             emit(Op::pop);
             return;
         case Stmt::Kind::return_value:
+            if (current_is_constructor_) {
+                fail(statement.token,
+                     "constructors cannot return a value");
+            }
             compile_expression_as(*statement.expression, current_return_type_);
             emit(Op::return_value);
             return;
@@ -1924,28 +2114,25 @@ private:
                 if (is_native_socket_class(class_name)) {
                     return compile_socket_method(expression);
                 }
-                if (!expression.arguments.empty()) {
-                    fail(expression.token,
-                         "method parameters are not supported yet");
-                }
                 const auto& method = lookup_method(
                     expression.token, class_name, expression.name);
                 const auto& function =
                     lookup_function(expression.token, method);
+                validate_call_arguments(expression, function);
                 compile_object_expression_as(*expression.left, class_name);
+                compile_call_arguments(expression, function);
                 emit(Op::call_method);
                 const auto target_offset = reserve_u32();
                 const auto locals_offset = reserve_u32();
+                emit_u16(static_cast<std::uint16_t>(
+                    expression.arguments.size()));
                 call_patches_.push_back({target_offset, locals_offset,
                                          expression.token, method});
                 return function.return_type;
             }
             if (class_info_.contains(expression.name)) {
-                if (!expression.arguments.empty()) {
-                    fail(expression.token,
-                         "constructors do not accept arguments yet");
-                }
-                emit_new_object(expression.name);
+                emit_construct_object(expression.name, expression.token,
+                                      &expression);
                 return ValueType::u64;
             }
             if (is_builtin_name(expression.name)) {
@@ -1953,13 +2140,13 @@ private:
             }
             const auto& function = lookup_function(expression.token,
                                                    expression.name);
-            if (!expression.arguments.empty()) {
-                fail(expression.token,
-                     "user-defined function parameters are not supported yet");
-            }
+            validate_call_arguments(expression, function);
+            compile_call_arguments(expression, function);
             emit(Op::call);
             const auto target_offset = reserve_u32();
             const auto locals_offset = reserve_u32();
+            emit_u16(static_cast<std::uint16_t>(
+                expression.arguments.size()));
             call_patches_.push_back(
                 {target_offset, locals_offset, expression.token, expression.name});
             return function.return_type;
@@ -2118,7 +2305,7 @@ private:
                 lookup_field(expression.token, class_name, expression.name);
             return {field.type, {}, field.pointer_depth};
         }
-        case Expr::Kind::call:
+        case Expr::Kind::call: {
             if (expression.left) {
                 const auto class_name = expression_class(*expression.left);
                 if (class_name.empty()) {
@@ -2131,20 +2318,15 @@ private:
                                ? SemanticType{type, "std::Socket", 0}
                                : SemanticType{type, {}, 0};
                 }
-                if (!expression.arguments.empty()) {
-                    fail(expression.token,
-                         "method parameters are not supported yet");
-                }
                 const auto& method = lookup_method(
                     expression.token, class_name, expression.name);
-                return {lookup_function(expression.token, method).return_type,
-                        {}, 0};
+                const auto& function =
+                    lookup_function(expression.token, method);
+                validate_call_arguments(expression, function);
+                return {function.return_type, {}, 0};
             }
             if (class_info_.contains(expression.name)) {
-                if (!expression.arguments.empty()) {
-                    fail(expression.token,
-                         "constructors do not accept arguments yet");
-                }
+                validate_constructor_arguments(expression.name, expression);
                 return {ValueType::u64, expression.name, 0};
             }
             if (is_builtin_name(expression.name)) {
@@ -2154,13 +2336,11 @@ private:
                 }
                 return {builtin_type(expression), {}, 0};
             }
-            if (!expression.arguments.empty()) {
-                fail(expression.token,
-                     "user-defined function parameters are not supported yet");
-            }
-            return {lookup_function(expression.token, expression.name)
-                        .return_type,
-                    {}, 0};
+            const auto& function =
+                lookup_function(expression.token, expression.name);
+            validate_call_arguments(expression, function);
+            return {function.return_type, {}, 0};
+        }
         case Expr::Kind::cast: {
             const auto source = semantic_type(*expression.right);
             if (source.pointer_depth != 0) {
@@ -2277,6 +2457,85 @@ private:
         }
         }
         throw std::logic_error("invalid expression kind");
+    }
+
+    void validate_argument(const Expr& expression,
+                           const SemanticType& expected) const {
+        const auto actual = semantic_type(expression);
+        if (expected.pointer_depth != 0) {
+            if (expression.kind == Expr::Kind::call && !expression.left &&
+                expression.name == "malloc") {
+                return;
+            }
+            if (actual.pointer_depth != expected.pointer_depth ||
+                actual.type != expected.type ||
+                actual.class_name != expected.class_name) {
+                fail(expression.token, "incompatible pointer argument");
+            }
+            return;
+        }
+        if (!expected.class_name.empty()) {
+            if (actual.pointer_depth != 0 ||
+                actual.class_name != expected.class_name) {
+                fail(expression.token,
+                     "expected object of class '" + expected.class_name +
+                         "'");
+            }
+            return;
+        }
+        if (actual.pointer_depth != 0 || !actual.class_name.empty()) {
+            fail(expression.token, "expected a core value argument");
+        }
+        if ((actual.type == ValueType::text) !=
+            (expected.type == ValueType::text)) {
+            fail(expression.token,
+                 "incompatible core value argument");
+        }
+    }
+
+    void validate_call_arguments(const Expr& expression,
+                                 const FunctionInfo& function) const {
+        if (expression.arguments.size() != function.parameters.size()) {
+            fail(expression.token,
+                 "call expects " +
+                     std::to_string(function.parameters.size()) +
+                     " argument" +
+                     (function.parameters.size() == 1 ? "" : "s"));
+        }
+        if (expression.arguments.size() >
+            std::numeric_limits<std::uint16_t>::max()) {
+            fail(expression.token, "call has too many arguments");
+        }
+        for (std::size_t index = 0; index < expression.arguments.size();
+             ++index) {
+            validate_argument(*expression.arguments[index],
+                              function.parameters[index]);
+        }
+    }
+
+    void validate_constructor_arguments(const std::string& class_name,
+                                        const Expr& expression) const {
+        const auto& declaration = lookup_class(expression.token, class_name);
+        if (declaration.constructor.empty()) {
+            if (!expression.arguments.empty()) {
+                fail(expression.token,
+                     "class '" + class_name +
+                         "' has no constructor accepting arguments");
+            }
+            return;
+        }
+        validate_call_arguments(
+            expression,
+            lookup_function(expression.token, declaration.constructor));
+    }
+
+    void compile_call_arguments(const Expr& expression,
+                                const FunctionInfo& function) {
+        for (std::size_t index = 0; index < expression.arguments.size();
+             ++index) {
+            compile_semantic_expression_as(*expression.arguments[index],
+                                           function.parameters[index]);
+        }
     }
 
     void compile_pointer_expression_as(const Expr& expression,
@@ -2765,6 +3024,40 @@ private:
         }
         emit(Op::new_object);
         emit_u16(declaration.field_count);
+    }
+
+    void emit_construct_object(const std::string& class_name,
+                               const Token& token,
+                               const Expr* expression) {
+        const auto& declaration = lookup_class(token, class_name);
+        const FunctionInfo* constructor = nullptr;
+        if (!declaration.constructor.empty()) {
+            constructor = &lookup_function(token, declaration.constructor);
+        }
+        if (expression) {
+            validate_constructor_arguments(class_name, *expression);
+        } else if (constructor && !constructor->parameters.empty()) {
+            fail(token, "constructor for class '" + class_name +
+                            "' expects " +
+                            std::to_string(constructor->parameters.size()) +
+                            " arguments");
+        }
+
+        emit_new_object(class_name);
+        if (!constructor) {
+            return;
+        }
+        if (expression) {
+            compile_call_arguments(*expression, *constructor);
+        }
+        emit(Op::call_constructor);
+        const auto target_offset = reserve_u32();
+        const auto locals_offset = reserve_u32();
+        const auto argument_count =
+            expression ? expression->arguments.size() : 0;
+        emit_u16(static_cast<std::uint16_t>(argument_count));
+        call_patches_.push_back({target_offset, locals_offset, token,
+                                 declaration.constructor});
     }
 
     const FunctionInfo& lookup_function(const Token& token,

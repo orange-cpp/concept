@@ -618,6 +618,112 @@ void generic_class_test() {
     }
 }
 
+void function_argument_constructor_test() {
+    constexpr std::string_view source = R"(
+        class Pair {
+            i32 left;
+            i32 right;
+
+            constructor(i32 left, i32 right) {
+                this.left = left;
+                this.right = right;
+            }
+
+            fn total(i32 bias) -> i32 {
+                return this.left + this.right + bias;
+            }
+        }
+
+        class DefaultValue {
+            i32 value;
+
+            constructor() {
+                this.value = 42;
+            }
+        }
+
+        class Box<T> {
+            T value;
+
+            constructor(T initial) {
+                this.value = initial;
+            }
+
+            fn choose(T fallback, bool current) -> T {
+                if (current) { return this.value; }
+                return fallback;
+            }
+        }
+
+        fn add_to(i32* target, i32 amount) -> i32 {
+            *target = *target + amount;
+            return *target;
+        }
+
+        fn combine(Pair pair, i32 bias, i32* extra) -> i32 {
+            return pair.total(bias) + *extra;
+        }
+
+        fn main() -> int {
+            Pair pair = Pair(10, 20);
+            i32 extra = 2;
+            add_to(&extra, 5);
+            i32 answer = combine(pair, 5, &extra);
+
+            DefaultValue automatic;
+            if (automatic.value != 42) { return 1; }
+
+            Box<float> box = Box<float>(41.5);
+            if (box.choose(0.0, true) + 0.5 != 42.0) { return 2; }
+            return answer;
+        }
+    )";
+
+    const auto compiled =
+        cpt::compile(source, "argument-constructor-test.concept", 8);
+    expect(cpt::execute(compiled) == 42,
+           "functions, methods, and constructors should accept arguments");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
+           "argument calls should survive serialized eight-VM bytecode");
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn add(i32 left, i32 right) -> i32 { return left + right; }
+            fn main() -> int { return add(1); }
+        )"));
+        expect(false, "wrong function argument counts should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            class Required {
+                constructor(i32 value) {}
+            }
+            fn main() -> int {
+                Required value;
+                return 0;
+            }
+        )"));
+        expect(false, "a required constructor argument should not be omitted");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            class Invalid {
+                constructor() { return 1; }
+            }
+            fn main() -> int {
+                Invalid value;
+                return 0;
+            }
+        )"));
+        expect(false, "constructors should not return values");
+    } catch (const cpt::CompileError&) {
+    }
+}
+
 void dynamic_array_test() {
     const auto source_root =
         std::filesystem::path(__FILE__).parent_path().parent_path();
@@ -682,6 +788,42 @@ void dynamic_array_test() {
            "std::array<T> should specialize for multiple core types");
     expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
            "generic arrays should execute across eight serialized VMs");
+}
+
+void http_module_test() {
+    const auto source_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path();
+    const auto standard_modules = source_root / "concept";
+    constexpr std::string_view source = R"(
+        import std::http;
+
+        fn main() -> int {
+            std::http request;
+            if (request.get()) { return 1; }
+            if (request.response != "") { return 2; }
+            if (request.path != "") { return 3; }
+            if (request.port != u16(0)) { return 4; }
+            return 42;
+        }
+    )";
+
+    const auto compiled = cpt::compile(
+        source, "http-module-test.concept", 8, standard_modules.string());
+    expect(cpt::execute(compiled) == 42,
+           "std::http should validate an empty request in Concept code");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
+           "std::http should survive serialized eight-VM bytecode");
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn main() -> int {
+                std::http request;
+                return 0;
+            }
+        )"));
+        expect(false, "std::http should require import std::http");
+    } catch (const cpt::CompileError&) {
+    }
 }
 
 void console_io_test() {
@@ -864,7 +1006,9 @@ int main() {
         array_heap_test();
         import_test();
         generic_class_test();
+        function_argument_constructor_test();
         dynamic_array_test();
+        http_module_test();
         console_io_test();
         core_types_test();
         error_test();
