@@ -68,6 +68,7 @@ enum class Op : std::uint8_t {
     store_field,
     address_local,
     address_field,
+    native_pointer,
     load_indirect,
     store_indirect,
     input_text,

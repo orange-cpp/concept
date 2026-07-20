@@ -262,6 +262,69 @@ void pointer_test() {
     expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
            "pointers should survive serialized multi-VM bytecode");
 
+    constexpr std::string_view pointer_cast_source = R"(
+        fn main() -> int {
+            u32* pointer = ptr_cast<u32>(0x10000);
+            return 42;
+        }
+    )";
+    expect(cpt::execute(cpt::compile(pointer_cast_source,
+                                     "pointer-cast-syntax.concept")) == 42,
+           "ptr_cast should accept hexadecimal integral addresses");
+
+#ifdef _WIN32
+    std::uint32_t native_value = 41;
+    std::ostringstream native_source;
+    native_source << R"(
+        fn main() -> int {
+            u32* pointer = ptr_cast<u32>(0x)"
+                  << std::hex
+                  << reinterpret_cast<std::uintptr_t>(&native_value) << R"();
+            *pointer = *pointer + 1;
+            return i32(*pointer);
+        }
+    )";
+    const auto native_bytecode =
+        cpt::compile(native_source.str(), "native-pointer-test.concept", 8);
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(native_bytecode))) ==
+               42 &&
+               native_value == 42,
+           "ptr_cast pointers should read and write valid process memory");
+#endif
+
+    try {
+        static_cast<void>(cpt::execute(cpt::compile(R"(
+            fn main() -> int {
+                u32* pointer = ptr_cast<u32>(0x1);
+                return i32(*pointer);
+            }
+        )")));
+        expect(false, "unreadable native pointer addresses should fail");
+    } catch (const std::runtime_error&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn main() -> int {
+                u32* pointer = ptr_cast<u32>(1.5);
+                return 0;
+            }
+        )"));
+        expect(false, "ptr_cast should require an integral address");
+    } catch (const cpt::CompileError&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(R"(
+            fn main() -> int {
+                string* pointer = ptr_cast<string>(0x10000);
+                return 0;
+            }
+        )"));
+        expect(false, "native string pointers should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
+
     try {
         static_cast<void>(cpt::compile(R"(
             fn main() -> int {

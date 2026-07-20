@@ -263,6 +263,21 @@ public:
         }
 
         if (std::isdigit(static_cast<unsigned char>(character)) != 0) {
+            if (character == '0' && !at_end() &&
+                (peek() == 'x' || peek() == 'X')) {
+                advance();
+                const auto digits_begin = position_;
+                while (!at_end() &&
+                       std::isxdigit(static_cast<unsigned char>(peek())) != 0) {
+                    advance();
+                }
+                if (position_ == digits_begin) {
+                    fail(line, column,
+                         "hexadecimal literal requires at least one digit");
+                }
+                return make_token(TokenKind::integer, start,
+                                  position_ - start, line, column);
+            }
             while (!at_end() &&
                    std::isdigit(static_cast<unsigned char>(peek())) != 0) {
                 advance();
@@ -428,8 +443,16 @@ private:
 };
 
 struct Expr {
-    enum class Kind { literal, variable, member, call, cast, unary, binary }
-        kind{};
+    enum class Kind {
+        literal,
+        variable,
+        member,
+        call,
+        cast,
+        pointer_cast,
+        unary,
+        binary,
+    } kind{};
     Token token;
     std::uint64_t bits{};
     ValueType value_type{ValueType::i64};
@@ -843,9 +866,16 @@ private:
             auto expression = std::make_unique<Expr>();
             expression->kind = Expr::Kind::literal;
             expression->token = current_;
-            const auto* begin = current_.text.data();
+            const bool hexadecimal =
+                current_.text.size() > 2 && current_.text[0] == '0' &&
+                (current_.text[1] == 'x' || current_.text[1] == 'X');
+            const auto* begin = current_.text.data() + (hexadecimal ? 2 : 0);
             const auto* end = begin + current_.text.size();
-            const auto result = std::from_chars(begin, end, expression->bits);
+            if (hexadecimal) {
+                end -= 2;
+            }
+            const auto result = std::from_chars(
+                begin, end, expression->bits, hexadecimal ? 16 : 10);
             if (result.ec != std::errc{} || result.ptr != end) {
                 fail(current_, "integer literal is outside the u64 range");
             }
@@ -893,6 +923,24 @@ private:
             consume(TokenKind::left_paren, "expected '(' after cast type");
             expression->right = parse_expression();
             consume(TokenKind::right_paren, "expected ')' after cast value");
+            return expression;
+        }
+        if (current_.kind == TokenKind::identifier &&
+            current_.text == "ptr_cast" && next_.kind == TokenKind::less) {
+            auto expression = std::make_unique<Expr>();
+            expression->kind = Expr::Kind::pointer_cast;
+            expression->token = current_;
+            advance();
+            consume(TokenKind::less, "expected '<' after ptr_cast");
+            const auto target =
+                consume(TokenKind::type_kw, "expected ptr_cast target type");
+            expression->value_type = value_type_from_name(target.text);
+            consume(TokenKind::greater, "expected '>' after ptr_cast type");
+            consume(TokenKind::left_paren,
+                    "expected '(' after ptr_cast type");
+            expression->right = parse_expression();
+            consume(TokenKind::right_paren,
+                    "expected ')' after ptr_cast address");
             return expression;
         }
         if (current_.kind == TokenKind::identifier) {
@@ -1578,6 +1626,12 @@ private:
                             expression.token);
             return expression.value_type;
         }
+        case Expr::Kind::pointer_cast:
+            static_cast<void>(semantic_type(expression));
+            compile_expression_as(*expression.right, ValueType::u64);
+            emit(Op::native_pointer);
+            emit_type(expression.value_type);
+            return ValueType::u64;
         case Expr::Kind::unary: {
             if (expression.op == TokenKind::ampersand) {
                 static_cast<void>(semantic_type(expression));
@@ -1723,6 +1777,19 @@ private:
                                            source.class_name + "'");
             }
             return {expression.value_type, {}, 0};
+        }
+        case Expr::Kind::pointer_cast: {
+            const auto source = semantic_type(*expression.right);
+            if (source.pointer_depth != 0 || !source.class_name.empty() ||
+                !is_integral(source.type)) {
+                fail(expression.token,
+                     "ptr_cast address must be an integral value");
+            }
+            if (expression.value_type == ValueType::text) {
+                fail(expression.token,
+                     "ptr_cast<string> is not supported");
+            }
+            return {expression.value_type, {}, 1};
         }
         case Expr::Kind::unary: {
             auto operand = semantic_type(*expression.right);

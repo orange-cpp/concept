@@ -2,6 +2,8 @@
 
 Concept is an experimental C-like language designed to help protect compiled applications from reverse engineering. It compiles programs to bytecode and packages each one as a native executable containing both the Concept virtual machine and the program bytecode.
 
+See the [Concept language syntax reference](docs/SYNTAX.md) for the grammar,
+types, operators, pointers, classes, imports, and built-in APIs implemented now.
 
 The implementation uses C++23 and currently targets a small bootstrap language.
 
@@ -134,15 +136,26 @@ Pointers use C-style syntax:
 i32 value = 41;
 i32* pointer = &value;
 *pointer = *pointer + 1;
+
+// The address must be readable for a load and writable for a store.
+u32* native = ptr_cast<u32>(0x10000);
+u32 native_value = *native;
 ```
 
-They are checked VM references, not native process addresses. A null pointer is
-created by leaving a pointer declaration uninitialized. Dereferencing null,
-invalid, or expired-local pointers stops the VM with an error. Core locals,
-pointer locals, class variables, and core class fields can be addressed;
-multi-level pointers and pointer fields are supported. Pointer arithmetic,
-casts, function pointer parameters/returns, arrays, and native-address access
-are not implemented yet.
+Pointers produced by `&` are checked VM references rather than native process
+addresses. A null pointer is created by leaving a pointer declaration
+uninitialized. Dereferencing null, invalid, or expired-local pointers stops the
+VM with an error. Core locals, pointer locals, class variables, and core class
+fields can be addressed; multi-level pointers and pointer fields are supported.
+
+`ptr_cast<T>(address)` explicitly creates a `T*` into the generated program's
+native address space. Its address expression must be integral, and `T` may be a
+numeric or `bool` core type. On Windows, native reads and writes are checked and
+produce a VM error when the requested memory is inaccessible. The programmer is
+still responsible for using a correct live address and matching value type.
+Native `string` and class pointers are not supported. Pointer arithmetic,
+general pointer casts, pointer function parameters/returns, and arrays are not
+implemented yet.
 
 Strings currently support storage, function returns, printing, and `==`/`!=`.
 Concatenation, indexing, and conversion between strings and numeric values are

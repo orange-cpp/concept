@@ -16,7 +16,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 8;
+constexpr std::uint32_t bytecode_version = 9;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -96,6 +96,7 @@ std::size_t operand_size(const Op op) {
     case Op::greater_equal:
     case Op::print:
     case Op::println:
+    case Op::native_pointer:
         return 1;
     case Op::pop:
     case Op::load_indirect:
@@ -509,6 +510,10 @@ void validate(const Bytecode& bytecode) {
             static_cast<void>(check_type(offset + 1));
         } else if (size == 1) {
             const auto type = check_type(offset);
+            if (op == Op::native_pointer && type == ValueType::text) {
+                throw std::runtime_error(
+                    "native string pointer in Concept bytecode");
+            }
             if ((op == Op::add || op == Op::subtract ||
                  op == Op::multiply || op == Op::divide ||
                  op == Op::negate || op == Op::less ||

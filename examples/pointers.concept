@@ -19,5 +19,8 @@ fn main() -> int {
     i32* field_pointer = &(*box_pointer).value;
     *field_pointer = *field_pointer + 1;
     box.alias = field_pointer;
+
+    // Replace this example address with a readable address before dereferencing.
+    u32* native_address = ptr_cast<u32>(0x10000);
     return *box.alias;
 }

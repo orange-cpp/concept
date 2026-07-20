@@ -43,9 +43,10 @@ struct Frame {
 };
 
 struct PointerTarget {
-    enum class Kind { local, field } kind{Kind::local};
+    enum class Kind { local, field, native_address } kind{Kind::local};
     std::uint64_t owner{};
     std::uint16_t index{};
+    ValueType native_type{ValueType::u64};
 };
 
 #ifdef _WIN32
@@ -178,8 +179,63 @@ private:
     }
 };
 
+class NativeMemoryApi {
+public:
+    decltype(&::ReadProcessMemory) read_function{};
+    decltype(&::WriteProcessMemory) write_function{};
+
+    NativeMemoryApi() {
+        static constexpr std::array<std::uint8_t, 12> module_name{
+            0xcc, 0x81, 0x53, 0x30, 0xfe, 0xb4, 0x26, 0x60, 0xa1, 0xa8,
+            0x65, 0x2a};
+        module_ = LoadLibraryA(decode_import_name(module_name).c_str());
+        if (module_ == nullptr) {
+            throw std::runtime_error(
+                "Concept VM could not load native-memory support");
+        }
+
+        static constexpr std::array<std::uint8_t, 17> read_name{
+            0xf5, 0x81, 0x40, 0x3a, 0xcb, 0xaa, 0x7a, 0x31, 0xea,
+            0xbf, 0x7a, 0x0b, 0xe6, 0xad, 0x92, 0x48, 0x0e};
+        static constexpr std::array<std::uint8_t, 18> write_name{
+            0xf0, 0x96, 0x48, 0x2a, 0xfe, 0x88, 0x67, 0x3d, 0xec,
+            0xa9, 0x7a, 0x35, 0xce, 0xa5, 0x90, 0x55, 0x05, 0xcd};
+        read_function = resolve<decltype(read_function)>(read_name);
+        write_function = resolve<decltype(write_function)>(write_name);
+    }
+
+    ~NativeMemoryApi() {
+        if (module_ != nullptr) {
+            FreeLibrary(module_);
+        }
+    }
+
+    NativeMemoryApi(const NativeMemoryApi&) = delete;
+    NativeMemoryApi& operator=(const NativeMemoryApi&) = delete;
+
+private:
+    HMODULE module_{};
+
+    template <typename Function, std::size_t Size>
+    Function resolve(const std::array<std::uint8_t, Size>& encoded_name) {
+        const auto name = decode_import_name(encoded_name);
+        const auto address = GetProcAddress(module_, name.c_str());
+        if (address == nullptr) {
+            throw std::runtime_error(
+                "Concept VM could not resolve native-memory support");
+        }
+        static_assert(sizeof(Function) == sizeof(address));
+        return std::bit_cast<Function>(address);
+    }
+};
+
 WinsockApi& winsock_api() {
     static WinsockApi api;
+    return api;
+}
+
+NativeMemoryApi& native_memory_api() {
+    static NativeMemoryApi api;
     return api;
 }
 
@@ -289,6 +345,71 @@ constexpr int send_flags = MSG_NOSIGNAL;
 constexpr int send_flags = 0;
 #endif
 #endif
+
+std::size_t native_value_size(const ValueType type) {
+    switch (type) {
+    case ValueType::boolean:
+    case ValueType::i8:
+    case ValueType::u8:
+        return 1;
+    case ValueType::i16:
+    case ValueType::u16:
+        return 2;
+    case ValueType::i32:
+    case ValueType::u32:
+    case ValueType::f32:
+        return 4;
+    case ValueType::i64:
+    case ValueType::u64:
+    case ValueType::f64:
+        return 8;
+    case ValueType::text:
+        throw std::runtime_error(
+            "Concept VM cannot access native string memory");
+    }
+    throw std::logic_error("invalid native pointer value type");
+}
+
+bool read_native_value(const std::uint64_t address, const ValueType type,
+                       std::uint64_t& value) {
+    value = 0;
+#ifdef _WIN32
+    SIZE_T transferred = 0;
+    const auto size = native_value_size(type);
+    const auto current_process =
+        reinterpret_cast<HANDLE>(static_cast<std::intptr_t>(-1));
+    return native_memory_api().read_function(
+               current_process,
+               reinterpret_cast<const void*>(
+                   static_cast<std::uintptr_t>(address)),
+               &value, size, &transferred) != FALSE &&
+           transferred == size;
+#else
+    static_cast<void>(address);
+    static_cast<void>(type);
+    return false;
+#endif
+}
+
+bool write_native_value(const std::uint64_t address, const ValueType type,
+                        const std::uint64_t value) {
+#ifdef _WIN32
+    SIZE_T transferred = 0;
+    const auto size = native_value_size(type);
+    const auto current_process =
+        reinterpret_cast<HANDLE>(static_cast<std::intptr_t>(-1));
+    return native_memory_api().write_function(
+               current_process,
+               reinterpret_cast<void*>(static_cast<std::uintptr_t>(address)),
+               &value, size, &transferred) != FALSE &&
+           transferred == size;
+#else
+    static_cast<void>(address);
+    static_cast<void>(type);
+    static_cast<void>(value);
+    return false;
+#endif
+}
 
 std::uint64_t socket_bits(const NativeSocket handle) {
     if (handle == invalid_socket) {
@@ -1012,12 +1133,22 @@ std::int64_t execute(const Bytecode& bytecode) {
             }
             return frame.locals[target.index];
         }
-        auto& fields = object_fields(target.owner);
-        if (target.index >= fields.size()) {
-            throw std::runtime_error(
-                "Concept VM pointer field index is out of range");
+        if (target.kind == PointerTarget::Kind::field) {
+            auto& fields = object_fields(target.owner);
+            if (target.index >= fields.size()) {
+                throw std::runtime_error(
+                    "Concept VM pointer field index is out of range");
+            }
+            return fields[target.index];
         }
-        return fields[target.index];
+        std::uint64_t value = 0;
+        if (!read_native_value(target.owner, target.native_type, value)) {
+            throw std::runtime_error(
+                "Concept VM could not read the native pointer address");
+        }
+        return target.native_type == ValueType::boolean
+                   ? (value == 0 ? 0ULL : 1ULL)
+                   : value;
     };
 
     const auto store_pointer = [&](const std::uint64_t handle,
@@ -1032,12 +1163,22 @@ std::int64_t execute(const Bytecode& bytecode) {
             frame.locals[target.index] = value;
             return;
         }
-        auto& fields = object_fields(target.owner);
-        if (target.index >= fields.size()) {
-            throw std::runtime_error(
-                "Concept VM pointer field index is out of range");
+        if (target.kind == PointerTarget::Kind::field) {
+            auto& fields = object_fields(target.owner);
+            if (target.index >= fields.size()) {
+                throw std::runtime_error(
+                    "Concept VM pointer field index is out of range");
+            }
+            fields[target.index] = value;
+            return;
         }
-        fields[target.index] = value;
+        const auto stored = target.native_type == ValueType::boolean
+                                ? (value == 0 ? 0ULL : 1ULL)
+                                : value;
+        if (!write_native_value(target.owner, target.native_type, stored)) {
+            throw std::runtime_error(
+                "Concept VM could not write the native pointer address");
+        }
     };
 
     for (;;) {
@@ -1125,6 +1266,18 @@ std::int64_t execute(const Bytecode& bytecode) {
             }
             pointer_heap.push_back(
                 {PointerTarget::Kind::field, object, index});
+            stack.push_back(pointer_heap.size());
+            break;
+        }
+        case Op::native_pointer: {
+            const auto type = read_type(bytecode.code, ip);
+            const auto address = pop();
+            if (address == 0) {
+                stack.push_back(0);
+                break;
+            }
+            pointer_heap.push_back(
+                {PointerTarget::Kind::native_address, address, 0, type});
             stack.push_back(pointer_heap.size());
             break;
         }
