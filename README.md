@@ -157,7 +157,8 @@ The bootstrap subset supports:
 - typed functions with multiple arguments, including forward calls and
   recursion;
 - typed local variables, assignment, blocks, `if`/`else`, and `while`;
-- `+`, `-`, `*`, `/`, `%`, unary `-` and `!`;
+- `+`, `-`, `*`, `/`, `%`, shifts `<<`/`>>`, bitwise `&`/`|`/`^`, and
+  unary `-`/`!`/`~`;
 - `==`, `!=`, `<`, `<=`, `>`, and `>=`;
 - `input()`/`input_text()` for whole lines, plus `input_i64()` and
   `input_f64()` for parsed numeric lines;
@@ -370,14 +371,17 @@ bool connected = client.connect("127.0.0.1", u16(8080));
 std::Socket peer = server.accept();
 i64 bytes = client.send("hello");
 string chunk = peer.recv();
+u8* binary = malloc(1024);
+i64 binary_count = peer.recv_bytes(binary, 1024);
 bool closed = client.close();
 ```
 
 `valid()` reports whether construction or `accept()` produced a valid socket.
-`send()` returns `-1` when it cannot send any bytes. `recv()` reads up to 4096
-bytes and returns an empty string on orderly shutdown or error. `bind()` accepts
-`"*"` or an empty string for all IPv4 interfaces. Sockets must be closed
-explicitly.
+`send()` and `send_bytes(u8*, count)` send the complete supplied range or
+return `-1` when they cannot send any bytes. `recv()` reads up to 4096 text
+bytes. `recv_bytes(u8*, count)` reads one binary block and returns its size,
+`0` for shutdown, or `-1` for error. `bind()` accepts `"*"` or an empty string
+for all IPv4 interfaces. Sockets must be closed explicitly.
 MSVC builds implement this API with Winsock while keeping the static CRT
 configuration. The runtime has no static `WS2_32.dll` import: it decodes the
 module and operation names, loads the socket component, and resolves its entry
@@ -385,6 +389,40 @@ points only when a socket opcode executes. Programs that do not execute socket
 operations therefore never load Winsock. This removes the obvious socket API
 from the PE import table, but runtime inspection can still observe the module
 after it is loaded.
+
+## Pure-Concept HTTPS profile
+
+`import std::https;` provides an HTTPS GET client whose TLS 1.3 record layer,
+handshake, transcript, key schedule, certificate authentication, and HTTP
+formatting are all implemented in `.concept` sources. The VM supplies only
+generic entropy, byte-buffer/string conversion, and TCP byte transport; it has
+no TLS or HTTP opcode and does not call a system TLS library.
+
+The implemented profile is intentionally narrow:
+
+- X25519 key agreement;
+- `TLS_CHACHA20_POLY1305_SHA256` (`0x1303`);
+- either `rsa_pss_rsae_sha256` (`0x0804`) with a 2048-bit RSA modulus,
+  exponent 65537, and a 32-byte PSS salt, or
+  `ecdsa_secp256r1_sha256` (`0x0403`) with an uncompressed P-256 public key;
+- an exact SHA-256 pin of the leaf certificate DER plus the matching RSA or
+  ECDSA public-key pin supplied by the caller;
+- HTTP/1.1 GET with `Connection: close`, authenticated `close_notify`, and the
+  raw response returned to the caller.
+
+See [`examples/https.concept`](examples/https.concept) for RSA and
+[`examples/https-ecdsa.concept`](examples/https-ecdsa.concept) for P-256. A
+failed certificate pin, CertificateVerify signature, Finished MAC, AEAD tag,
+selected cipher/group/version, or malformed record makes `get()` fail closed
+and places a short diagnostic in `error`. The pinned live-endpoint example in
+[`examples/https-libomath.concept`](examples/https-libomath.concept) performs a
+GET request to `https://libomath.org/`.
+
+This is an educational implementation, not a production TLS stack. It does not
+implement the Web PKI, hostname/expiry/revocation checking, AES-GCM, session
+resumption, HelloRetryRequest, client certificates, or constant-time audited
+cryptography. Update the certificate and public-key pins deliberately when the
+server certificate or key changes.
 
 Self-hosting is a later bootstrap stage: extend this subset until a Concept
 compiler can be written in Concept, compile it with the C++ compiler, then package

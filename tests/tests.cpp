@@ -1074,6 +1074,43 @@ void http_module_test() {
     }
 }
 
+void binary_buffer_test() {
+    const auto source_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path();
+    const auto standard_modules = source_root / "concept";
+    constexpr std::string_view source = R"(
+        import std::bytes;
+
+        fn main() -> int {
+            std::bytes buffer;
+            if (!buffer.append_u32(u32(0x12345678))) { return 1; }
+            if (buffer.read_u32(0) != u32(0x12345678)) { return 2; }
+
+            buffer.clear();
+            if (!buffer.append_text("A\0B")) { return 3; }
+            if (buffer.length != 3) { return 4; }
+            if (buffer.get(0) != u8(65)) { return 5; }
+            if (buffer.get(1) != u8(0)) { return 6; }
+            if (buffer.get(2) != u8(66)) { return 7; }
+            if (buffer.to_string() != "A\0B") { return 8; }
+
+            std::bytes random;
+            if (!random.fill_random(32)) { return 9; }
+            if (random.length != 32) { return 10; }
+            random.destroy();
+            buffer.destroy();
+            return 42;
+        }
+    )";
+
+    const auto compiled = cpt::compile(source, "binary-buffer-test.concept", 8,
+                                       standard_modules.string());
+    expect(cpt::execute(compiled) == 42,
+           "Concept byte buffers, text conversion, and entropy should execute");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
+           "binary buffer operations should survive serialized bytecode");
+}
+
 void console_io_test() {
     constexpr std::string_view source = R"(
         fn read_name() -> string {
@@ -1213,6 +1250,47 @@ void type_error_test() {
     }
 }
 
+void bitwise_test() {
+    constexpr std::string_view source = R"(
+        fn main() -> i32 {
+            u32 value = u32(0x12345678);
+            u32 rotated = (value >> 8) | (value << 24);
+            if (rotated != u32(0x78123456)) { return 1; }
+            if ((u32(0x0f0f) & u32(0x00ff)) != u32(0x000f)) {
+                return 2;
+            }
+            if ((u32(0x0f00) | u32(0x00f0)) != u32(0x0ff0)) {
+                return 3;
+            }
+            if ((u32(0xaaaa) ^ u32(0xffff)) != u32(0x5555)) {
+                return 4;
+            }
+            if (~u8(0xf0) != u8(0x0f)) { return 5; }
+            return 42;
+        }
+    )";
+
+    const auto compiled = cpt::compile(source, "bitwise-test.concept", 8);
+    expect(cpt::execute(compiled) == 42,
+           "integral bitwise, shift, and complement operators should execute");
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,
+           "bitwise operations should survive serialized multi-VM bytecode");
+
+    try {
+        static_cast<void>(cpt::execute(cpt::compile(
+            "fn main() -> i32 { return i32(u32(1) << 32); }")));
+        expect(false, "out-of-range shift counts should be runtime errors");
+    } catch (const std::runtime_error&) {
+    }
+
+    try {
+        static_cast<void>(cpt::compile(
+            "fn main() -> i32 { f32 value = 1.0; return i32(value & 1); }"));
+        expect(false, "floating-point bitwise operations should be compile errors");
+    } catch (const cpt::CompileError&) {
+    }
+}
+
 void error_test() {
     try {
         static_cast<void>(cpt::compile("fn main() -> i64 { return missing; }"));
@@ -1261,8 +1339,10 @@ int main() {
         shared_module_entry_test();
         dynamic_array_test();
         http_module_test();
+        binary_buffer_test();
         console_io_test();
         core_types_test();
+        bitwise_test();
         error_test();
         type_error_test();
     } catch (const std::exception& error) {

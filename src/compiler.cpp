@@ -60,6 +60,11 @@ enum class TokenKind {
     slash,
     percent,
     ampersand,
+    pipe,
+    caret,
+    tilde,
+    shift_left,
+    shift_right,
     bang,
     equal,
     not_equal,
@@ -353,6 +358,12 @@ public:
             return make_token(TokenKind::percent, start, 1, line, column);
         case '&':
             return make_token(TokenKind::ampersand, start, 1, line, column);
+        case '|':
+            return make_token(TokenKind::pipe, start, 1, line, column);
+        case '^':
+            return make_token(TokenKind::caret, start, 1, line, column);
+        case '~':
+            return make_token(TokenKind::tilde, start, 1, line, column);
         case '-':
             if (match('>')) {
                 return make_token(TokenKind::arrow, start, 2, line, column);
@@ -369,11 +380,19 @@ public:
             }
             return make_token(TokenKind::bang, start, 1, line, column);
         case '<':
+            if (match('<')) {
+                return make_token(TokenKind::shift_left, start, 2, line,
+                                  column);
+            }
             if (match('=')) {
                 return make_token(TokenKind::less_equal, start, 2, line, column);
             }
             return make_token(TokenKind::less, start, 1, line, column);
         case '>':
+            if (match('>')) {
+                return make_token(TokenKind::shift_right, start, 2, line,
+                                  column);
+            }
             if (match('=')) {
                 return make_token(TokenKind::greater_equal, start, 2, line,
                                   column);
@@ -963,7 +982,31 @@ private:
         return statement;
     }
 
-    std::unique_ptr<Expr> parse_expression() { return parse_equality(); }
+    std::unique_ptr<Expr> parse_expression() { return parse_bitwise_or(); }
+
+    std::unique_ptr<Expr> parse_bitwise_or() {
+        auto expression = parse_bitwise_xor();
+        while (current_.kind == TokenKind::pipe) {
+            expression = make_binary(std::move(expression));
+        }
+        return expression;
+    }
+
+    std::unique_ptr<Expr> parse_bitwise_xor() {
+        auto expression = parse_bitwise_and();
+        while (current_.kind == TokenKind::caret) {
+            expression = make_binary(std::move(expression));
+        }
+        return expression;
+    }
+
+    std::unique_ptr<Expr> parse_bitwise_and() {
+        auto expression = parse_equality();
+        while (current_.kind == TokenKind::ampersand) {
+            expression = make_binary(std::move(expression));
+        }
+        return expression;
+    }
 
     std::unique_ptr<Expr> parse_equality() {
         auto expression = parse_comparison();
@@ -975,11 +1018,20 @@ private:
     }
 
     std::unique_ptr<Expr> parse_comparison() {
-        auto expression = parse_term();
+        auto expression = parse_shift();
         while (current_.kind == TokenKind::less ||
                current_.kind == TokenKind::less_equal ||
                current_.kind == TokenKind::greater ||
                current_.kind == TokenKind::greater_equal) {
+            expression = make_binary(std::move(expression));
+        }
+        return expression;
+    }
+
+    std::unique_ptr<Expr> parse_shift() {
+        auto expression = parse_term();
+        while (current_.kind == TokenKind::shift_left ||
+               current_.kind == TokenKind::shift_right) {
             expression = make_binary(std::move(expression));
         }
         return expression;
@@ -1007,6 +1059,7 @@ private:
     std::unique_ptr<Expr> parse_unary() {
         if (current_.kind == TokenKind::minus ||
             current_.kind == TokenKind::bang ||
+            current_.kind == TokenKind::tilde ||
             current_.kind == TokenKind::ampersand ||
             current_.kind == TokenKind::star) {
             auto expression = std::make_unique<Expr>();
@@ -1254,13 +1307,22 @@ private:
         expression->op = current_.kind;
         expression->left = std::move(left);
         advance();
-        if (expression->op == TokenKind::equal ||
+        if (expression->op == TokenKind::pipe) {
+            expression->right = parse_bitwise_xor();
+        } else if (expression->op == TokenKind::caret) {
+            expression->right = parse_bitwise_and();
+        } else if (expression->op == TokenKind::ampersand) {
+            expression->right = parse_equality();
+        } else if (expression->op == TokenKind::equal ||
             expression->op == TokenKind::not_equal) {
             expression->right = parse_comparison();
         } else if (expression->op == TokenKind::less ||
                    expression->op == TokenKind::less_equal ||
                    expression->op == TokenKind::greater ||
                    expression->op == TokenKind::greater_equal) {
+            expression->right = parse_shift();
+        } else if (expression->op == TokenKind::shift_left ||
+                   expression->op == TokenKind::shift_right) {
             expression->right = parse_term();
         } else if (expression->op == TokenKind::plus ||
                    expression->op == TokenKind::minus) {
@@ -2282,6 +2344,15 @@ private:
                 emit_type(operand_type);
                 return ValueType::boolean;
             }
+            if (expression.op == TokenKind::tilde) {
+                if (!is_integral(operand_type)) {
+                    fail(expression.token,
+                         "unary '~' requires an integral operand");
+                }
+                emit(Op::bit_not);
+                emit_type(operand_type);
+                return operand_type;
+            }
             if (!is_numeric(operand_type)) {
                 fail(expression.token, "unary '-' requires a numeric operand");
             }
@@ -2320,6 +2391,13 @@ private:
             const auto result_type = expression_type(expression);
             const auto left_type = expression_type(*expression.left);
             const auto right_type = expression_type(*expression.right);
+            if (is_shift(expression.op)) {
+                compile_expression_as(*expression.left, left_type);
+                compile_expression_as(*expression.right, ValueType::u64);
+                emit(binary_op(expression));
+                emit_type(left_type);
+                return result_type;
+            }
             const auto operation_type =
                 is_comparison(expression.op)
                     ? comparison_operand_type(expression, left_type, right_type)
@@ -2503,6 +2581,13 @@ private:
             if (expression.op == TokenKind::bang) {
                 return {ValueType::boolean, {}, 0};
             }
+            if (expression.op == TokenKind::tilde) {
+                if (!is_integral(operand.type)) {
+                    fail(expression.token,
+                         "unary '~' requires an integral operand");
+                }
+                return operand;
+            }
             if (!is_numeric(operand.type)) {
                 fail(expression.token,
                      "unary '-' requires a numeric operand");
@@ -2548,11 +2633,22 @@ private:
                     expression, left.type, right.type));
                 return {ValueType::boolean, {}, 0};
             }
+            if (is_shift(expression.op)) {
+                if (!is_integral(left.type) || !is_integral(right.type)) {
+                    fail(expression.token,
+                         "shift operators require integral operands");
+                }
+                return left;
+            }
             const auto type =
                 common_numeric_type(expression, left.type, right.type);
-            if (expression.op == TokenKind::percent && is_floating(type)) {
+            if ((expression.op == TokenKind::percent ||
+                 is_bitwise(expression.op)) &&
+                !is_integral(type)) {
                 fail(expression.token,
-                     "operator '%' requires integral operands");
+                     expression.op == TokenKind::percent
+                         ? "operator '%' requires integral operands"
+                         : "bitwise operators require integral operands");
             }
             return {type, {}, 0};
         }
@@ -2720,7 +2816,9 @@ private:
                name == "input_i64" || name == "input_f64" ||
                name == "print" || name == "println" ||
                name == "__win_api_call" || name == "malloc" ||
-               name == "free";
+               name == "free" || name == "entropy_fill" ||
+               name == "string_length" || name == "string_byte" ||
+               name == "string_from_bytes";
     }
 
     [[nodiscard]] ValueType builtin_type(const Expr& expression) const {
@@ -2764,6 +2862,51 @@ private:
                 fail(expression.token, "free expects a pointer");
             }
             return ValueType::i64;
+        }
+        if (expression.name == "entropy_fill" ||
+            expression.name == "string_from_bytes") {
+            require_arguments(2);
+            const auto pointer = semantic_type(*expression.arguments[0]);
+            const auto count = semantic_type(*expression.arguments[1]);
+            if (pointer.pointer_depth != 1 ||
+                pointer.type != ValueType::u8 ||
+                !pointer.class_name.empty()) {
+                fail(expression.arguments[0]->token,
+                     "binary buffer must be a u8 pointer");
+            }
+            if (count.pointer_depth != 0 || !count.class_name.empty() ||
+                !is_integral(count.type)) {
+                fail(expression.arguments[1]->token,
+                     "binary buffer length must be integral");
+            }
+            return expression.name == "entropy_fill" ? ValueType::boolean
+                                                       : ValueType::text;
+        }
+        if (expression.name == "string_length") {
+            require_arguments(1);
+            const auto value = semantic_type(*expression.arguments[0]);
+            if (value.pointer_depth != 0 || !value.class_name.empty() ||
+                value.type != ValueType::text) {
+                fail(expression.arguments[0]->token,
+                     "string_length expects a string");
+            }
+            return ValueType::u64;
+        }
+        if (expression.name == "string_byte") {
+            require_arguments(2);
+            const auto value = semantic_type(*expression.arguments[0]);
+            const auto index = semantic_type(*expression.arguments[1]);
+            if (value.pointer_depth != 0 || !value.class_name.empty() ||
+                value.type != ValueType::text) {
+                fail(expression.arguments[0]->token,
+                     "string_byte expects a string");
+            }
+            if (index.pointer_depth != 0 || !index.class_name.empty() ||
+                !is_integral(index.type)) {
+                fail(expression.arguments[1]->token,
+                     "string byte index must be integral");
+            }
+            return ValueType::u8;
         }
         if (expression.name == "__win_api_call") {
 #ifndef _WIN64
@@ -2843,6 +2986,25 @@ private:
             emit(Op::heap_free);
             return result_type;
         }
+        if (expression.name == "entropy_fill" ||
+            expression.name == "string_from_bytes") {
+            static_cast<void>(compile_expression(*expression.arguments[0]));
+            compile_expression_as(*expression.arguments[1], ValueType::u64);
+            emit(expression.name == "entropy_fill" ? Op::entropy_fill
+                                                     : Op::text_from_bytes);
+            return result_type;
+        }
+        if (expression.name == "string_length") {
+            compile_expression_as(*expression.arguments[0], ValueType::text);
+            emit(Op::text_length);
+            return result_type;
+        }
+        if (expression.name == "string_byte") {
+            compile_expression_as(*expression.arguments[0], ValueType::text);
+            compile_expression_as(*expression.arguments[1], ValueType::u64);
+            emit(Op::text_byte);
+            return result_type;
+        }
         if (expression.name == "__win_api_call") {
             compile_expression_as(*expression.arguments[0], ValueType::text);
             compile_expression_as(*expression.arguments[1], ValueType::text);
@@ -2902,6 +3064,17 @@ private:
                operation == TokenKind::less_equal ||
                operation == TokenKind::greater ||
                operation == TokenKind::greater_equal;
+    }
+
+    [[nodiscard]] static bool is_bitwise(const TokenKind operation) {
+        return operation == TokenKind::ampersand ||
+               operation == TokenKind::pipe ||
+               operation == TokenKind::caret;
+    }
+
+    [[nodiscard]] static bool is_shift(const TokenKind operation) {
+        return operation == TokenKind::shift_left ||
+               operation == TokenKind::shift_right;
     }
 
     [[nodiscard]] ValueType comparison_operand_type(
@@ -3017,6 +3190,16 @@ private:
             return Op::divide;
         case TokenKind::percent:
             return Op::modulo;
+        case TokenKind::ampersand:
+            return Op::bit_and;
+        case TokenKind::pipe:
+            return Op::bit_or;
+        case TokenKind::caret:
+            return Op::bit_xor;
+        case TokenKind::shift_left:
+            return Op::shift_left;
+        case TokenKind::shift_right:
+            return Op::shift_right;
         case TokenKind::equal:
             return Op::equal;
         case TokenKind::not_equal:
@@ -3112,6 +3295,24 @@ private:
             require_arguments(0);
             return ValueType::text;
         }
+        if (expression.name == "send_bytes" ||
+            expression.name == "recv_bytes") {
+            require_arguments(2);
+            const auto pointer = semantic_type(*expression.arguments[0]);
+            const auto count = semantic_type(*expression.arguments[1]);
+            if (pointer.pointer_depth != 1 ||
+                pointer.type != ValueType::u8 ||
+                !pointer.class_name.empty()) {
+                fail(expression.arguments[0]->token,
+                     "socket binary buffer must be a u8 pointer");
+            }
+            if (count.pointer_depth != 0 || !count.class_name.empty() ||
+                !is_integral(count.type)) {
+                fail(expression.arguments[1]->token,
+                     "socket binary buffer length must be integral");
+            }
+            return ValueType::i64;
+        }
         if (expression.name == "close") {
             require_arguments(0);
             return ValueType::boolean;
@@ -3142,6 +3343,12 @@ private:
             emit(Op::socket_send);
         } else if (expression.name == "recv") {
             emit(Op::socket_receive);
+        } else if (expression.name == "send_bytes" ||
+                   expression.name == "recv_bytes") {
+            static_cast<void>(compile_expression(*expression.arguments[0]));
+            compile_expression_as(*expression.arguments[1], ValueType::u64);
+            emit(expression.name == "send_bytes" ? Op::socket_send_bytes
+                                                   : Op::socket_receive_bytes);
         } else if (expression.name == "valid") {
             emit(Op::push_bits);
             emit_u64(std::numeric_limits<std::uint64_t>::max());

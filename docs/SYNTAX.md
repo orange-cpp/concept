@@ -251,11 +251,15 @@ Operators are listed from highest to lowest precedence:
 |---|---|---|
 | Primary | literals, names, `call()`, casts, `(expression)` | — |
 | Postfix | `value[index]`, `object.field`, `object.method()` | Left-associative |
-| Unary | `-value`, `!value`, `&value`, `*pointer` | Right-associative |
+| Unary | `-value`, `!value`, `~value`, `&value`, `*pointer` | Right-associative |
 | Multiplicative | `*`, `/`, `%` | `%` requires integral operands |
 | Additive | `+`, `-` | Numeric operands or supported pointer arithmetic |
+| Shift | `<<`, `>>` | Integral operands; result uses the left type |
 | Relational | `<`, `<=`, `>`, `>=` | Numeric operands only |
 | Equality | `==`, `!=` | Numeric, `bool`, or matching strings |
+| Bitwise AND | `&` | Integral operands only |
+| Bitwise XOR | `^` | Integral operands only |
+| Bitwise OR | `|` | Integral operands only |
 
 Parentheses override precedence. In particular, dereference a class pointer
 before selecting a field:
@@ -264,10 +268,12 @@ before selecting a field:
 (*box_pointer).value
 ```
 
-There are currently no logical `&&` or `||`, bitwise operators, increment or
-decrement operators, compound assignments, or ternary expressions. Pointer
-arithmetic supports `pointer + integer`, `integer + pointer`, and
-`pointer - integer`; class objects cannot be used with binary operators.
+There are currently no logical `&&` or `||`, increment or decrement operators,
+compound assignments, or ternary expressions. Bitwise and shift operators
+require integral operands. A shift count greater than or equal to the left
+operand width is a runtime error; signed right shift is arithmetic. Pointer
+arithmetic supports `pointer + integer`, `integer + pointer`, and `pointer -
+integer`; class objects cannot be used with binary operators.
 
 ## Core value casts
 
@@ -594,12 +600,107 @@ Set `host`, `path`, and `port`, then call `get()`. An empty path defaults to
 response was received and places the raw HTTP response in `response`. Hostnames
 are resolved by the underlying socket connection.
 
-The current socket receive operation returns at most 4096 bytes, so
+The current socket text receive operation returns at most 4096 bytes, so
 `response` contains the first response block. The module does not yet decode
-headers, redirects, chunked transfer encoding, or content encodings. HTTPS is
-not supported because the standard library does not yet provide TLS. All HTTP
-request formatting and control flow are defined in `concept/std/http.concept`;
-the VM contains no HTTP-specific implementation.
+headers, redirects, chunked transfer encoding, or content encodings. Use
+`std::https` for the pinned TLS 1.3 profile below. All HTTP request formatting
+and control flow are defined in Concept source; the VM contains no
+HTTP-specific implementation.
+
+## Binary buffers and cryptography
+
+The VM exposes four generic binary helpers used by the Concept standard
+library:
+
+| Function | Meaning |
+|---|---|
+| `entropy_fill(u8* output, count)` | Fill a checked VM byte range from host entropy |
+| `string_length(string value)` | Return the byte length of text |
+| `string_byte(string value, index)` | Read one checked text byte |
+| `string_from_bytes(u8* input, count)` | Create text preserving every byte, including zero |
+
+`std::bytes` in `concept/std/bytes.concept` owns a growable `u8` buffer. Its
+methods include `reserve`, `resize`, `append`, big-endian `append_u16`/`u24`/
+`u32`, `append_bytes`, `append_text`, `read_u16`/`u24`/`u32`, `fill_random`,
+`to_string`, and `destroy`. There is no automatic destructor, so callers that
+retain a buffer should call `destroy()`.
+
+`std::crypto` implements SHA-256, HMAC-SHA256, HKDF-SHA256 and TLS 1.3 HKDF
+labels, ChaCha20, Poly1305, ChaCha20-Poly1305, and X25519 in Concept source.
+`std::rsa` implements only RSA-PSS/SHA-256 verification for a 2048-bit modulus,
+exponent 65537, and 32-byte salt. `std::ecdsa` implements strict-DER
+ECDSA/SHA-256 verification over NIST P-256, including public-point validation.
+These modules operate on caller-sized `u8*` buffers and are educational code,
+not constant-time or independently audited.
+
+## `std::https`
+
+`std::https` performs a TLS 1.3 HTTP/1.1 GET entirely in Concept source:
+
+```c
+import std::https;
+
+fn main() -> int {
+    u8* leaf_pin = malloc(32);       // SHA-256 of leaf certificate DER
+    u8* rsa_modulus = malloc(256);   // matching big-endian RSA modulus
+    // Fill both buffers with values obtained through a trusted channel.
+
+    std::https request;
+    request.host = "api.example.com";
+    request.path = "/status";
+    request.port = u16(443);
+    request.certificate_sha256 = leaf_pin;
+    request.certificate_sha256_length = 32;
+    request.rsa_modulus = rsa_modulus;
+    request.rsa_modulus_length = 256;
+
+    if (!request.get()) {
+        println(request.error);
+        return 1;
+    }
+    print(request.response);
+    return 0;
+}
+```
+
+For an ECDSA endpoint, provide the 65-byte uncompressed SEC1 point instead of
+the RSA modulus:
+
+```c
+u8* public_key = malloc(65); // 0x04 || 32-byte X || 32-byte Y
+// Fill public_key through a trusted channel.
+request.ecdsa_public_key = public_key;
+request.ecdsa_public_key_length = 65;
+```
+
+At least one authentication key is required. If both valid key lengths are
+configured, the ClientHello advertises both schemes and verifies whichever one
+the server selects.
+
+Port `0` defaults to `443`, and an empty path defaults to `"/"`. On success,
+`response` contains the complete raw HTTP response received before TLS shutdown.
+On failure, `error` describes the failed stage. The complete executable example
+at `examples/https.concept` shows RSA pin decoding, while
+`examples/https-ecdsa.concept` shows P-256. The peer must send an authenticated
+TLS `close_notify`; an unauthenticated TCP EOF is rejected to avoid treating a
+truncated raw response as complete.
+
+The current interoperable profile requires TLS 1.3, X25519, and
+`TLS_CHACHA20_POLY1305_SHA256`. CertificateVerify may use either
+`rsa_pss_rsae_sha256` with a 2048-bit RSA key using exponent 65537 or
+`ecdsa_secp256r1_sha256` with a P-256 key. The client validates the exact leaf
+DER pin, verifies CertificateVerify with the separately pinned public key,
+verifies Finished and every AEAD tag, and rejects malformed or unsupported
+handshake data.
+
+This direct-pinning profile does not parse Web-PKI chains or check hostname,
+validity dates, revocation, certificate policies, or public-key consistency
+inside X.509. The caller must obtain both pins through a trusted channel and
+replace them deliberately when the endpoint rotates its certificate or key.
+There is no AES-GCM, HelloRetryRequest, session resumption, KeyUpdate, client
+certificate, HTTP redirect, content decoding, or chunked-body decoder. The
+cryptographic code has not been audited for constant-time behavior and is not
+production-safe.
 
 ## `std::Socket`
 
@@ -630,6 +731,8 @@ The current IPv4 TCP API is:
 | `accept()` | `std::Socket` | Accept one connection |
 | `send(string data)` | `i64` | Return bytes sent, or `-1` when nothing could be sent |
 | `recv()` | `string` | Read up to 4096 bytes; empty means shutdown or error |
+| `send_bytes(u8* data, count)` | `i64` | Send a checked binary range |
+| `recv_bytes(u8* data, count)` | `i64` | Read one binary block into a checked range |
 | `close()` | `bool` | Close the socket |
 
 Sockets are not closed automatically. Socket support is loaded lazily when a
@@ -660,12 +763,16 @@ statement      = block
 
 lvalue         = identifier | member-expression | index-expression
                | "*", unary-expression ;
-expression     = equality-expression ;
+expression     = bitwise-or ;
+bitwise-or     = bitwise-xor, { "|", bitwise-xor } ;
+bitwise-xor    = bitwise-and, { "^", bitwise-and } ;
+bitwise-and    = equality, { "&", equality } ;
 equality       = comparison, { ( "==" | "!=" ), comparison } ;
-comparison     = additive, { ( "<" | "<=" | ">" | ">=" ), additive } ;
+comparison     = shift, { ( "<" | "<=" | ">" | ">=" ), shift } ;
+shift          = additive, { ( "<<" | ">>" ), additive } ;
 additive       = multiplicative, { ( "+" | "-" ), multiplicative } ;
 multiplicative = unary, { ( "*" | "/" | "%" ), unary } ;
-unary          = ( "-" | "!" | "&" | "*" ), unary | postfix ;
+unary          = ( "-" | "!" | "~" | "&" | "*" ), unary | postfix ;
 postfix        = primary,
                  { "[", expression, "]"
                  | ".", identifier, [ "(", [ arguments ], ")" ] } ;
@@ -690,8 +797,8 @@ The current language does not yet provide:
 - class or no-value (`void`) function returns;
 - object destruction;
 - `for`, `do`, `switch`, `break`, or `continue`;
-- logical short-circuit, bitwise, compound-assignment, increment, decrement, or
-  ternary operators;
+- logical short-circuit, compound-assignment, increment, decrement, or ternary
+  operators;
 - string concatenation, indexing, or numeric conversion;
 - multiple constructors, class-valued fields, inheritance, visibility, or
   static members;

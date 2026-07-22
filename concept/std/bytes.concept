@@ -1,0 +1,179 @@
+// Concept-only growable binary buffer.
+//
+// The VM exposes only generic byte transport, text conversion, and host entropy
+// primitives. Buffer ownership, sizing, encoding, and parsing live here.
+
+class std::bytes {
+    u8* data;
+    u64 length;
+    u64 capacity;
+
+    fn reserve(u64 required) -> bool {
+        if (required <= this.capacity) {
+            return true;
+        }
+
+        u64 next = 64;
+        if (this.capacity != 0) {
+            next = this.capacity;
+        }
+        while (next < required) {
+            next = next * 2;
+        }
+
+        u8* replacement = malloc(next);
+        u64 index = 0;
+        while (index < this.length) {
+            replacement[index] = this.data[index];
+            index = index + 1;
+        }
+        if (this.capacity != 0) {
+            free(this.data);
+        }
+        this.data = replacement;
+        this.capacity = next;
+        return true;
+    }
+
+    fn resize(u64 size) -> bool {
+        if (!this.reserve(size)) {
+            return false;
+        }
+        while (this.length < size) {
+            this.data[this.length] = u8(0);
+            this.length = this.length + 1;
+        }
+        this.length = size;
+        return true;
+    }
+
+    fn clear() -> bool {
+        this.length = 0;
+        return true;
+    }
+
+    fn append(u8 value) -> bool {
+        if (!this.reserve(this.length + 1)) {
+            return false;
+        }
+        this.data[this.length] = value;
+        this.length = this.length + 1;
+        return true;
+    }
+
+    fn append_u16(u16 value) -> bool {
+        this.append(u8(value >> 8));
+        this.append(u8(value));
+        return true;
+    }
+
+    fn append_u24(u32 value) -> bool {
+        this.append(u8(value >> 16));
+        this.append(u8(value >> 8));
+        this.append(u8(value));
+        return true;
+    }
+
+    fn append_u32(u32 value) -> bool {
+        this.append(u8(value >> 24));
+        this.append(u8(value >> 16));
+        this.append(u8(value >> 8));
+        this.append(u8(value));
+        return true;
+    }
+
+    fn append_bytes(u8* source, u64 count) -> bool {
+        if (!this.reserve(this.length + count)) {
+            return false;
+        }
+        u64 index = 0;
+        while (index < count) {
+            this.data[this.length + index] = source[index];
+            index = index + 1;
+        }
+        this.length = this.length + count;
+        return true;
+    }
+
+    fn append_text(string value) -> bool {
+        u64 count = string_length(value);
+        if (!this.reserve(this.length + count)) {
+            return false;
+        }
+        u64 index = 0;
+        while (index < count) {
+            this.data[this.length + index] = string_byte(value, index);
+            index = index + 1;
+        }
+        this.length = this.length + count;
+        return true;
+    }
+
+    fn valid(u64 index) -> bool {
+        return index < this.length;
+    }
+
+    fn get(u64 index) -> u8 {
+        if (!this.valid(index)) {
+            return u8(0);
+        }
+        return this.data[index];
+    }
+
+    fn set(u64 index, u8 value) -> bool {
+        if (!this.valid(index)) {
+            return false;
+        }
+        this.data[index] = value;
+        return true;
+    }
+
+    fn read_u16(u64 index) -> u16 {
+        if (index + 2 > this.length) {
+            return u16(0);
+        }
+        return (u16(this.data[index]) << 8) |
+            u16(this.data[index + 1]);
+    }
+
+    fn read_u24(u64 index) -> u32 {
+        if (index + 3 > this.length) {
+            return u32(0);
+        }
+        return (u32(this.data[index]) << 16) |
+            (u32(this.data[index + 1]) << 8) |
+            u32(this.data[index + 2]);
+    }
+
+    fn read_u32(u64 index) -> u32 {
+        if (index + 4 > this.length) {
+            return u32(0);
+        }
+        return (u32(this.data[index]) << 24) |
+            (u32(this.data[index + 1]) << 16) |
+            (u32(this.data[index + 2]) << 8) |
+            u32(this.data[index + 3]);
+    }
+
+    fn fill_random(u64 count) -> bool {
+        if (!this.resize(count)) {
+            return false;
+        }
+        return entropy_fill(this.data, count);
+    }
+
+    fn to_string() -> string {
+        return string_from_bytes(this.data, this.length);
+    }
+
+    fn destroy() -> bool {
+        if (this.capacity != 0) {
+            free(this.data);
+        }
+        u8* empty;
+        this.data = empty;
+        this.length = 0;
+        this.capacity = 0;
+        return true;
+    }
+}

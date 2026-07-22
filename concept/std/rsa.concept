@@ -1,0 +1,309 @@
+// Educational RSA-PSS verifier implemented entirely in Concept.
+//
+// This deliberately supports only the TLS 1.3 rsa_pss_rsae_sha256 profile:
+// a 2048-bit modulus, public exponent 65537, SHA-256, and a 32-byte salt.
+
+import std::crypto;
+
+fn std::rsa::compare_limbs(u64* left, u64* right, u64 count) -> i32 {
+    u64 index = count;
+    while (index != 0) {
+        index = index - 1;
+        if (left[index] > right[index]) {
+            return 1;
+        }
+        if (left[index] < right[index]) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+fn std::rsa::copy_limbs(u64* destination, u64* source, u64 count) -> bool {
+    u64 index = 0;
+    while (index < count) {
+        destination[index] = source[index];
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::rsa::subtract_limbs(u64* value, u64* modulus, u64 count) -> bool {
+    u64 borrow = 0;
+    u64 index = 0;
+    while (index < count) {
+        u64 subtrahend = modulus[index] + borrow;
+        u64 current = value[index];
+        if (current < subtrahend) {
+            value[index] = current + u64(65536) - subtrahend;
+            borrow = 1;
+        } else {
+            value[index] = current - subtrahend;
+            borrow = 0;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::rsa::double_mod(u64* value, u64* modulus, u64 count) -> bool {
+    u64 carry = 0;
+    u64 index = 0;
+    while (index < count) {
+        u64 doubled = value[index] * 2 + carry;
+        value[index] = doubled & u64(0xffff);
+        carry = doubled >> 16;
+        index = index + 1;
+    }
+    if (carry != 0) {
+        std::rsa::subtract_limbs(value, modulus, count);
+        return true;
+    }
+    if (std::rsa::compare_limbs(value, modulus, count) >= 0) {
+        std::rsa::subtract_limbs(value, modulus, count);
+    }
+    return true;
+}
+
+fn std::rsa::montgomery_multiply(
+    u64* left, u64* right, u64* modulus, u64 count, u64 inverse,
+    u64* output) -> bool {
+    u64 total_count = count * 2 + 2;
+    u64* product = malloc(total_count * 8);
+    u64 outer = 0;
+    u64 inner = 0;
+    u64 multiplier = 0;
+    u64 carry = 0;
+    u64 combined = 0;
+    u64 position = 0;
+    while (outer < count) {
+        inner = 0;
+        while (inner < count) {
+            product[outer + inner] = product[outer + inner] +
+                left[outer] * right[inner];
+            inner = inner + 1;
+        }
+        outer = outer + 1;
+    }
+
+    u64 index = 0;
+    while (index + 1 < total_count) {
+        product[index + 1] = product[index + 1] + (product[index] >> 16);
+        product[index] = product[index] & u64(0xffff);
+        index = index + 1;
+    }
+
+    outer = 0;
+    while (outer < count) {
+        multiplier = (product[outer] * inverse) & u64(0xffff);
+        carry = 0;
+        inner = 0;
+        while (inner < count) {
+            combined = product[outer + inner] +
+                multiplier * modulus[inner] + carry;
+            product[outer + inner] = combined & u64(0xffff);
+            carry = combined >> 16;
+            inner = inner + 1;
+        }
+        position = outer + count;
+        while (carry != 0) {
+            combined = product[position] + carry;
+            product[position] = combined & u64(0xffff);
+            carry = combined >> 16;
+            position = position + 1;
+        }
+        outer = outer + 1;
+    }
+
+    index = 0;
+    while (index < count) {
+        output[index] = product[count + index];
+        index = index + 1;
+    }
+    if (product[count * 2] != 0) {
+        std::rsa::subtract_limbs(output, modulus, count);
+    } else {
+        if (std::rsa::compare_limbs(output, modulus, count) >= 0) {
+            std::rsa::subtract_limbs(output, modulus, count);
+        }
+    }
+    free(product);
+    return true;
+}
+
+fn std::rsa::public_65537(
+    u8* modulus_bytes, u8* signature_bytes, u8* encoded_message) -> bool {
+    u64 limb_count = 128;
+    u64* modulus = malloc(limb_count * 8);
+    u64* signature = malloc(limb_count * 8);
+    u64 index = 0;
+    u64 byte_index = 0;
+    while (index < limb_count) {
+        byte_index = 255 - index * 2;
+        modulus[index] = u64(modulus_bytes[byte_index]) |
+            (u64(modulus_bytes[byte_index - 1]) << 8);
+        signature[index] = u64(signature_bytes[byte_index]) |
+            (u64(signature_bytes[byte_index - 1]) << 8);
+        index = index + 1;
+    }
+    if (std::rsa::compare_limbs(signature, modulus, limb_count) >= 0) {
+        free(signature);
+        free(modulus);
+        return false;
+    }
+
+    u64 inverse = 1;
+    index = 0;
+    while (index < 6) {
+        u64 low_product = (modulus[0] * inverse) & u64(0xffff);
+        inverse = (inverse * (u64(65538) - low_product)) & u64(0xffff);
+        index = index + 1;
+    }
+    inverse = (u64(65536) - inverse) & u64(0xffff);
+
+    u64* r_squared = malloc(limb_count * 8);
+    r_squared[0] = 1;
+    index = 0;
+    while (index < 4096) {
+        std::rsa::double_mod(r_squared, modulus, limb_count);
+        index = index + 1;
+    }
+
+    u64* base = malloc(limb_count * 8);
+    u64* result = malloc(limb_count * 8);
+    u64* temporary = malloc(limb_count * 8);
+    u64* one = malloc(limb_count * 8);
+    one[0] = 1;
+    std::rsa::montgomery_multiply(
+        signature, r_squared, modulus, limb_count, inverse, base);
+    std::rsa::montgomery_multiply(
+        one, r_squared, modulus, limb_count, inverse, result);
+
+    u64 bit = 17;
+    while (bit != 0) {
+        bit = bit - 1;
+        std::rsa::montgomery_multiply(
+            result, result, modulus, limb_count, inverse, temporary);
+        std::rsa::copy_limbs(result, temporary, limb_count);
+        if (bit == 16) {
+            std::rsa::montgomery_multiply(
+                result, base, modulus, limb_count, inverse, temporary);
+            std::rsa::copy_limbs(result, temporary, limb_count);
+        }
+        if (bit == 0) {
+            std::rsa::montgomery_multiply(
+                result, base, modulus, limb_count, inverse, temporary);
+            std::rsa::copy_limbs(result, temporary, limb_count);
+        }
+    }
+    std::rsa::montgomery_multiply(
+        result, one, modulus, limb_count, inverse, temporary);
+
+    index = 0;
+    while (index < limb_count) {
+        byte_index = 255 - index * 2;
+        encoded_message[byte_index] = u8(temporary[index]);
+        encoded_message[byte_index - 1] = u8(temporary[index] >> 8);
+        index = index + 1;
+    }
+
+    free(one);
+    free(temporary);
+    free(result);
+    free(base);
+    free(r_squared);
+    free(signature);
+    free(modulus);
+    return true;
+}
+
+fn std::rsa::verify_pss_sha256(
+    u8* modulus, u64 modulus_length, u8* signature,
+    u64 signature_length, u8* message_hash) -> bool {
+    if (modulus_length != 256) {
+        return false;
+    }
+    if (signature_length != 256) {
+        return false;
+    }
+    if ((modulus[0] & u8(0x80)) == u8(0)) {
+        return false;
+    }
+    if ((modulus[255] & u8(1)) == u8(0)) {
+        return false;
+    }
+
+    u8* encoded = malloc(256);
+    if (!std::rsa::public_65537(modulus, signature, encoded)) {
+        free(encoded);
+        return false;
+    }
+    if (encoded[255] != u8(0xbc)) {
+        free(encoded);
+        return false;
+    }
+    if ((encoded[0] & u8(0x80)) != u8(0)) {
+        free(encoded);
+        return false;
+    }
+
+    u8* mask_input = malloc(36);
+    u64 index = 0;
+    while (index < 32) {
+        mask_input[index] = encoded[223 + index];
+        index = index + 1;
+    }
+    u8* database = malloc(223);
+    u8* digest = malloc(32);
+    u64 generated = 0;
+    u32 counter = 0;
+    while (generated < 223) {
+        mask_input[32] = u8(counter >> 24);
+        mask_input[33] = u8(counter >> 16);
+        mask_input[34] = u8(counter >> 8);
+        mask_input[35] = u8(counter);
+        std::crypto::sha256(mask_input, 36, digest);
+        u64 take = 32;
+        if (generated + take > 223) {
+            take = 223 - generated;
+        }
+        u64 offset = 0;
+        while (offset < take) {
+            database[generated + offset] =
+                encoded[generated + offset] ^ digest[offset];
+            offset = offset + 1;
+        }
+        generated = generated + take;
+        counter = counter + 1;
+    }
+    database[0] = database[0] & u8(0x7f);
+
+    u64 differences = 0;
+    index = 0;
+    while (index < 190) {
+        differences = differences | u64(database[index]);
+        index = index + 1;
+    }
+    differences = differences | u64(database[190] ^ u8(1));
+
+    u8* signed_hash_input = malloc(72);
+    index = 0;
+    while (index < 32) {
+        signed_hash_input[8 + index] = message_hash[index];
+        signed_hash_input[40 + index] = database[191 + index];
+        index = index + 1;
+    }
+    std::crypto::sha256(signed_hash_input, 72, digest);
+    index = 0;
+    while (index < 32) {
+        differences = differences | u64(digest[index] ^ encoded[223 + index]);
+        index = index + 1;
+    }
+
+    free(signed_hash_input);
+    free(digest);
+    free(database);
+    free(mask_input);
+    free(encoded);
+    return differences == 0;
+}

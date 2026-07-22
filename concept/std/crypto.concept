@@ -1,0 +1,907 @@
+// Educational cryptographic primitives implemented in Concept source.
+// This module currently provides SHA-256, HMAC-SHA256, and HKDF-SHA256.
+
+import std::bytes;
+
+fn std::crypto::rotate_right(u32 value, u32 count) -> u32 {
+    return (value >> count) | (value << (u32(32) - count));
+}
+
+fn std::crypto::load_u32(u8* input, u64 index) -> u32 {
+    return (u32(input[index]) << 24) |
+        (u32(input[index + 1]) << 16) |
+        (u32(input[index + 2]) << 8) |
+        u32(input[index + 3]);
+}
+
+fn std::crypto::store_u32(u8* output, u64 index, u32 value) -> bool {
+    output[index] = u8(value >> 24);
+    output[index + 1] = u8(value >> 16);
+    output[index + 2] = u8(value >> 8);
+    output[index + 3] = u8(value);
+    return true;
+}
+
+fn std::crypto::sha256(u8* input, u64 length, u8* output) -> bool {
+    u64 total = ((length + 9 + 63) / 64) * 64;
+    u8* message = malloc(total);
+    u64 index = 0;
+    while (index < length) {
+        message[index] = input[index];
+        index = index + 1;
+    }
+    message[length] = u8(0x80);
+
+    u64 bit_length = length * 8;
+    index = 0;
+    while (index < 8) {
+        message[total - 1 - index] = u8(bit_length >> u32(index * 8));
+        index = index + 1;
+    }
+
+    u32* constants = malloc(256);
+    constants[0] = u32(0x428a2f98);
+    constants[1] = u32(0x71374491);
+    constants[2] = u32(0xb5c0fbcf);
+    constants[3] = u32(0xe9b5dba5);
+    constants[4] = u32(0x3956c25b);
+    constants[5] = u32(0x59f111f1);
+    constants[6] = u32(0x923f82a4);
+    constants[7] = u32(0xab1c5ed5);
+    constants[8] = u32(0xd807aa98);
+    constants[9] = u32(0x12835b01);
+    constants[10] = u32(0x243185be);
+    constants[11] = u32(0x550c7dc3);
+    constants[12] = u32(0x72be5d74);
+    constants[13] = u32(0x80deb1fe);
+    constants[14] = u32(0x9bdc06a7);
+    constants[15] = u32(0xc19bf174);
+    constants[16] = u32(0xe49b69c1);
+    constants[17] = u32(0xefbe4786);
+    constants[18] = u32(0x0fc19dc6);
+    constants[19] = u32(0x240ca1cc);
+    constants[20] = u32(0x2de92c6f);
+    constants[21] = u32(0x4a7484aa);
+    constants[22] = u32(0x5cb0a9dc);
+    constants[23] = u32(0x76f988da);
+    constants[24] = u32(0x983e5152);
+    constants[25] = u32(0xa831c66d);
+    constants[26] = u32(0xb00327c8);
+    constants[27] = u32(0xbf597fc7);
+    constants[28] = u32(0xc6e00bf3);
+    constants[29] = u32(0xd5a79147);
+    constants[30] = u32(0x06ca6351);
+    constants[31] = u32(0x14292967);
+    constants[32] = u32(0x27b70a85);
+    constants[33] = u32(0x2e1b2138);
+    constants[34] = u32(0x4d2c6dfc);
+    constants[35] = u32(0x53380d13);
+    constants[36] = u32(0x650a7354);
+    constants[37] = u32(0x766a0abb);
+    constants[38] = u32(0x81c2c92e);
+    constants[39] = u32(0x92722c85);
+    constants[40] = u32(0xa2bfe8a1);
+    constants[41] = u32(0xa81a664b);
+    constants[42] = u32(0xc24b8b70);
+    constants[43] = u32(0xc76c51a3);
+    constants[44] = u32(0xd192e819);
+    constants[45] = u32(0xd6990624);
+    constants[46] = u32(0xf40e3585);
+    constants[47] = u32(0x106aa070);
+    constants[48] = u32(0x19a4c116);
+    constants[49] = u32(0x1e376c08);
+    constants[50] = u32(0x2748774c);
+    constants[51] = u32(0x34b0bcb5);
+    constants[52] = u32(0x391c0cb3);
+    constants[53] = u32(0x4ed8aa4a);
+    constants[54] = u32(0x5b9cca4f);
+    constants[55] = u32(0x682e6ff3);
+    constants[56] = u32(0x748f82ee);
+    constants[57] = u32(0x78a5636f);
+    constants[58] = u32(0x84c87814);
+    constants[59] = u32(0x8cc70208);
+    constants[60] = u32(0x90befffa);
+    constants[61] = u32(0xa4506ceb);
+    constants[62] = u32(0xbef9a3f7);
+    constants[63] = u32(0xc67178f2);
+
+    u32 h0 = u32(0x6a09e667);
+    u32 h1 = u32(0xbb67ae85);
+    u32 h2 = u32(0x3c6ef372);
+    u32 h3 = u32(0xa54ff53a);
+    u32 h4 = u32(0x510e527f);
+    u32 h5 = u32(0x9b05688c);
+    u32 h6 = u32(0x1f83d9ab);
+    u32 h7 = u32(0x5be0cd19);
+
+    u32* words = malloc(256);
+    u64 block = 0;
+    while (block < total) {
+        index = 0;
+        while (index < 16) {
+            words[index] = std::crypto::load_u32(
+                message, block + index * 4);
+            index = index + 1;
+        }
+        while (index < 64) {
+            u32 s0 = std::crypto::rotate_right(words[index - 15], u32(7)) ^
+                std::crypto::rotate_right(words[index - 15], u32(18)) ^
+                (words[index - 15] >> 3);
+            u32 s1 = std::crypto::rotate_right(words[index - 2], u32(17)) ^
+                std::crypto::rotate_right(words[index - 2], u32(19)) ^
+                (words[index - 2] >> 10);
+            words[index] = words[index - 16] + s0 +
+                words[index - 7] + s1;
+            index = index + 1;
+        }
+
+        u32 a = h0;
+        u32 b = h1;
+        u32 c = h2;
+        u32 d = h3;
+        u32 e = h4;
+        u32 f = h5;
+        u32 g = h6;
+        u32 h = h7;
+
+        index = 0;
+        while (index < 64) {
+            u32 sum1 = std::crypto::rotate_right(e, u32(6)) ^
+                std::crypto::rotate_right(e, u32(11)) ^
+                std::crypto::rotate_right(e, u32(25));
+            u32 choose = (e & f) ^ ((~e) & g);
+            u32 temporary1 = h + sum1 + choose +
+                constants[index] + words[index];
+            u32 sum0 = std::crypto::rotate_right(a, u32(2)) ^
+                std::crypto::rotate_right(a, u32(13)) ^
+                std::crypto::rotate_right(a, u32(22));
+            u32 majority = (a & b) ^ (a & c) ^ (b & c);
+            u32 temporary2 = sum0 + majority;
+
+            h = g;
+            g = f;
+            f = e;
+            e = d + temporary1;
+            d = c;
+            c = b;
+            b = a;
+            a = temporary1 + temporary2;
+            index = index + 1;
+        }
+
+        h0 = h0 + a;
+        h1 = h1 + b;
+        h2 = h2 + c;
+        h3 = h3 + d;
+        h4 = h4 + e;
+        h5 = h5 + f;
+        h6 = h6 + g;
+        h7 = h7 + h;
+        block = block + 64;
+    }
+
+    std::crypto::store_u32(output, 0, h0);
+    std::crypto::store_u32(output, 4, h1);
+    std::crypto::store_u32(output, 8, h2);
+    std::crypto::store_u32(output, 12, h3);
+    std::crypto::store_u32(output, 16, h4);
+    std::crypto::store_u32(output, 20, h5);
+    std::crypto::store_u32(output, 24, h6);
+    std::crypto::store_u32(output, 28, h7);
+
+    free(words);
+    free(constants);
+    free(message);
+    return true;
+}
+
+fn std::crypto::hmac_sha256(
+    u8* key, u64 key_length,
+    u8* data, u64 data_length,
+    u8* output) -> bool {
+    u8* key_block = malloc(64);
+    u64 index = 0;
+    if (key_length > 64) {
+        std::crypto::sha256(key, key_length, key_block);
+        index = 32;
+    } else {
+        while (index < key_length) {
+            key_block[index] = key[index];
+            index = index + 1;
+        }
+    }
+    while (index < 64) {
+        key_block[index] = u8(0);
+        index = index + 1;
+    }
+
+    u8* inner = malloc(64 + data_length);
+    index = 0;
+    while (index < 64) {
+        inner[index] = key_block[index] ^ u8(0x36);
+        index = index + 1;
+    }
+    index = 0;
+    while (index < data_length) {
+        inner[64 + index] = data[index];
+        index = index + 1;
+    }
+
+    u8* inner_hash = malloc(32);
+    std::crypto::sha256(inner, 64 + data_length, inner_hash);
+
+    u8* outer = malloc(96);
+    index = 0;
+    while (index < 64) {
+        outer[index] = key_block[index] ^ u8(0x5c);
+        index = index + 1;
+    }
+    index = 0;
+    while (index < 32) {
+        outer[64 + index] = inner_hash[index];
+        index = index + 1;
+    }
+    std::crypto::sha256(outer, 96, output);
+
+    free(outer);
+    free(inner_hash);
+    free(inner);
+    free(key_block);
+    return true;
+}
+
+fn std::crypto::hkdf_extract(
+    u8* salt, u64 salt_length,
+    u8* input, u64 input_length,
+    u8* output) -> bool {
+    return std::crypto::hmac_sha256(
+        salt, salt_length, input, input_length, output);
+}
+
+fn std::crypto::hkdf_expand(
+    u8* key, u8* info, u64 info_length,
+    u8* output, u64 output_length) -> bool {
+    if (output_length > 8160) {
+        return false;
+    }
+
+    u8* previous = malloc(32);
+    u8* digest = malloc(32);
+    u64 previous_length = 0;
+    u64 written = 0;
+    u16 counter = u16(1);
+
+    while (written < output_length) {
+        u64 message_length = previous_length + info_length + 1;
+        u8* message = malloc(message_length);
+        u64 index = 0;
+        while (index < previous_length) {
+            message[index] = previous[index];
+            index = index + 1;
+        }
+        u64 info_index = 0;
+        while (info_index < info_length) {
+            message[index + info_index] = info[info_index];
+            info_index = info_index + 1;
+        }
+        message[previous_length + info_length] = u8(counter);
+
+        std::crypto::hmac_sha256(
+            key, 32, message, message_length, digest);
+        free(message);
+
+        u64 take = 32;
+        if (take > output_length - written) {
+            take = output_length - written;
+        }
+        index = 0;
+        while (index < take) {
+            output[written + index] = digest[index];
+            index = index + 1;
+        }
+        index = 0;
+        while (index < 32) {
+            previous[index] = digest[index];
+            index = index + 1;
+        }
+        previous_length = 32;
+        written = written + take;
+        counter = counter + u16(1);
+    }
+
+    free(digest);
+    free(previous);
+    return true;
+}
+
+fn std::crypto::hkdf_expand_label(
+    u8* secret, string label,
+    u8* context, u64 context_length,
+    u8* output, u64 output_length) -> bool {
+    u64 label_length = string_length(label);
+    if (label_length > 249) {
+        return false;
+    }
+    if (context_length > 255) {
+        return false;
+    }
+    if (output_length > 65535) {
+        return false;
+    }
+
+    u64 full_label_length = 6 + label_length;
+    u64 info_length = 2 + 1 + full_label_length + 1 + context_length;
+    u8* info = malloc(info_length);
+    info[0] = u8(output_length >> 8);
+    info[1] = u8(output_length);
+    info[2] = u8(full_label_length);
+    info[3] = u8(116);
+    info[4] = u8(108);
+    info[5] = u8(115);
+    info[6] = u8(49);
+    info[7] = u8(51);
+    info[8] = u8(32);
+
+    u64 index = 0;
+    while (index < label_length) {
+        info[9 + index] = string_byte(label, index);
+        index = index + 1;
+    }
+    u64 context_length_index = 9 + label_length;
+    info[context_length_index] = u8(context_length);
+    index = 0;
+    while (index < context_length) {
+        info[context_length_index + 1 + index] = context[index];
+        index = index + 1;
+    }
+
+    bool result = std::crypto::hkdf_expand(
+        secret, info, info_length, output, output_length);
+    free(info);
+    return result;
+}
+
+fn std::crypto::rotate_left(u32 value, u32 count) -> u32 {
+    return (value << count) | (value >> (u32(32) - count));
+}
+
+fn std::crypto::load_u32_le(u8* input, u64 index) -> u32 {
+    return u32(input[index]) |
+        (u32(input[index + 1]) << 8) |
+        (u32(input[index + 2]) << 16) |
+        (u32(input[index + 3]) << 24);
+}
+
+fn std::crypto::store_u32_le(u8* output, u64 index, u32 value) -> bool {
+    output[index] = u8(value);
+    output[index + 1] = u8(value >> 8);
+    output[index + 2] = u8(value >> 16);
+    output[index + 3] = u8(value >> 24);
+    return true;
+}
+
+fn std::crypto::store_u64_le(u8* output, u64 index, u64 value) -> bool {
+    u64 offset = 0;
+    while (offset < 8) {
+        output[index + offset] = u8(value >> u32(offset * 8));
+        offset = offset + 1;
+    }
+    return true;
+}
+
+fn std::crypto::chacha_quarter(
+    u32* state, u64 ai, u64 bi, u64 ci, u64 di) -> bool {
+    state[ai] = state[ai] + state[bi];
+    state[di] = std::crypto::rotate_left(
+        state[di] ^ state[ai], u32(16));
+    state[ci] = state[ci] + state[di];
+    state[bi] = std::crypto::rotate_left(
+        state[bi] ^ state[ci], u32(12));
+    state[ai] = state[ai] + state[bi];
+    state[di] = std::crypto::rotate_left(
+        state[di] ^ state[ai], u32(8));
+    state[ci] = state[ci] + state[di];
+    state[bi] = std::crypto::rotate_left(
+        state[bi] ^ state[ci], u32(7));
+    return true;
+}
+
+fn std::crypto::chacha20_block(
+    u8* key, u32 counter, u8* nonce, u8* output) -> bool {
+    u32* initial = malloc(64);
+    u32* state = malloc(64);
+    initial[0] = u32(0x61707865);
+    initial[1] = u32(0x3320646e);
+    initial[2] = u32(0x79622d32);
+    initial[3] = u32(0x6b206574);
+    u64 index = 0;
+    while (index < 8) {
+        initial[4 + index] = std::crypto::load_u32_le(key, index * 4);
+        index = index + 1;
+    }
+    initial[12] = counter;
+    initial[13] = std::crypto::load_u32_le(nonce, 0);
+    initial[14] = std::crypto::load_u32_le(nonce, 4);
+    initial[15] = std::crypto::load_u32_le(nonce, 8);
+    index = 0;
+    while (index < 16) {
+        state[index] = initial[index];
+        index = index + 1;
+    }
+
+    u64 round = 0;
+    while (round < 10) {
+        std::crypto::chacha_quarter(state, 0, 4, 8, 12);
+        std::crypto::chacha_quarter(state, 1, 5, 9, 13);
+        std::crypto::chacha_quarter(state, 2, 6, 10, 14);
+        std::crypto::chacha_quarter(state, 3, 7, 11, 15);
+        std::crypto::chacha_quarter(state, 0, 5, 10, 15);
+        std::crypto::chacha_quarter(state, 1, 6, 11, 12);
+        std::crypto::chacha_quarter(state, 2, 7, 8, 13);
+        std::crypto::chacha_quarter(state, 3, 4, 9, 14);
+        round = round + 1;
+    }
+    index = 0;
+    while (index < 16) {
+        state[index] = state[index] + initial[index];
+        std::crypto::store_u32_le(output, index * 4, state[index]);
+        index = index + 1;
+    }
+    free(state);
+    free(initial);
+    return true;
+}
+
+fn std::crypto::chacha20_xor(
+    u8* key, u32 counter, u8* nonce,
+    u8* input, u64 length, u8* output) -> bool {
+    u8* block = malloc(64);
+    u64 offset = 0;
+    while (offset < length) {
+        std::crypto::chacha20_block(key, counter, nonce, block);
+        u64 count = 64;
+        if (count > length - offset) {
+            count = length - offset;
+        }
+        u64 index = 0;
+        while (index < count) {
+            output[offset + index] = input[offset + index] ^ block[index];
+            index = index + 1;
+        }
+        offset = offset + count;
+        counter = counter + u32(1);
+    }
+    free(block);
+    return true;
+}
+
+fn std::crypto::poly1305(
+    u8* key, u8* message, u64 length, u8* tag) -> bool {
+    u64 r0 = u64(std::crypto::load_u32_le(key, 0)) & u64(0x3ffffff);
+    u64 r1 = (u64(std::crypto::load_u32_le(key, 3)) >> 2) &
+        u64(0x3ffff03);
+    u64 r2 = (u64(std::crypto::load_u32_le(key, 6)) >> 4) &
+        u64(0x3ffc0ff);
+    u64 r3 = (u64(std::crypto::load_u32_le(key, 9)) >> 6) &
+        u64(0x3f03fff);
+    u64 r4 = (u64(std::crypto::load_u32_le(key, 12)) >> 8) &
+        u64(0x00fffff);
+    u64 s1 = r1 * 5;
+    u64 s2 = r2 * 5;
+    u64 s3 = r3 * 5;
+    u64 s4 = r4 * 5;
+
+    u64 h0 = 0;
+    u64 h1 = 0;
+    u64 h2 = 0;
+    u64 h3 = 0;
+    u64 h4 = 0;
+    u64 carry = 0;
+    u64 offset = 0;
+    u8* partial = malloc(16);
+    while (offset < length) {
+        u64 remaining = length - offset;
+        u8* block = message + offset;
+        u64 high = u64(1) << 24;
+        u64 consumed = 16;
+        if (remaining < 16) {
+            u64 clear = 0;
+            while (clear < 16) {
+                partial[clear] = u8(0);
+                clear = clear + 1;
+            }
+            clear = 0;
+            while (clear < remaining) {
+                partial[clear] = message[offset + clear];
+                clear = clear + 1;
+            }
+            partial[remaining] = u8(1);
+            block = partial;
+            high = 0;
+            consumed = remaining;
+        }
+
+        h0 = h0 + (u64(std::crypto::load_u32_le(block, 0)) &
+            u64(0x3ffffff));
+        h1 = h1 + ((u64(std::crypto::load_u32_le(block, 3)) >> 2) &
+            u64(0x3ffffff));
+        h2 = h2 + ((u64(std::crypto::load_u32_le(block, 6)) >> 4) &
+            u64(0x3ffffff));
+        h3 = h3 + ((u64(std::crypto::load_u32_le(block, 9)) >> 6) &
+            u64(0x3ffffff));
+        h4 = h4 + ((u64(std::crypto::load_u32_le(block, 12)) >> 8) |
+            high);
+
+        u64 d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
+        u64 d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2;
+        u64 d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3;
+        u64 d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4;
+        u64 d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
+
+        carry = d0 >> 26;
+        h0 = d0 & u64(0x3ffffff);
+        d1 = d1 + carry;
+        carry = d1 >> 26;
+        h1 = d1 & u64(0x3ffffff);
+        d2 = d2 + carry;
+        carry = d2 >> 26;
+        h2 = d2 & u64(0x3ffffff);
+        d3 = d3 + carry;
+        carry = d3 >> 26;
+        h3 = d3 & u64(0x3ffffff);
+        d4 = d4 + carry;
+        carry = d4 >> 26;
+        h4 = d4 & u64(0x3ffffff);
+        h0 = h0 + carry * 5;
+        carry = h0 >> 26;
+        h0 = h0 & u64(0x3ffffff);
+        h1 = h1 + carry;
+        offset = offset + consumed;
+    }
+    free(partial);
+
+    carry = h1 >> 26;
+    h1 = h1 & u64(0x3ffffff); h2 = h2 + carry;
+    carry = h2 >> 26;
+    h2 = h2 & u64(0x3ffffff); h3 = h3 + carry;
+    carry = h3 >> 26;
+    h3 = h3 & u64(0x3ffffff); h4 = h4 + carry;
+    carry = h4 >> 26;
+    h4 = h4 & u64(0x3ffffff); h0 = h0 + carry * 5;
+    carry = h0 >> 26;
+    h0 = h0 & u64(0x3ffffff); h1 = h1 + carry;
+
+    i64 t0 = i64(h0) - i64(0x3fffffb);
+    i64 borrow = 0;
+    if (t0 < 0) { t0 = t0 + i64(0x4000000); borrow = 1; }
+    i64 t1 = i64(h1) - i64(0x3ffffff) - borrow;
+    borrow = 0;
+    if (t1 < 0) { t1 = t1 + i64(0x4000000); borrow = 1; }
+    i64 t2 = i64(h2) - i64(0x3ffffff) - borrow;
+    borrow = 0;
+    if (t2 < 0) { t2 = t2 + i64(0x4000000); borrow = 1; }
+    i64 t3 = i64(h3) - i64(0x3ffffff) - borrow;
+    borrow = 0;
+    if (t3 < 0) { t3 = t3 + i64(0x4000000); borrow = 1; }
+    i64 t4 = i64(h4) - i64(0x3ffffff) - borrow;
+    if (t4 >= 0) {
+        h0 = u64(t0); h1 = u64(t1); h2 = u64(t2);
+        h3 = u64(t3); h4 = u64(t4);
+    }
+
+    u64 f0 = (h0 | (h1 << 26)) & u64(0xffffffff);
+    u64 f1 = ((h1 >> 6) | (h2 << 20)) & u64(0xffffffff);
+    u64 f2 = ((h2 >> 12) | (h3 << 14)) & u64(0xffffffff);
+    u64 f3 = ((h3 >> 18) | (h4 << 8)) & u64(0xffffffff);
+    f0 = f0 + u64(std::crypto::load_u32_le(key, 16));
+    f1 = f1 + u64(std::crypto::load_u32_le(key, 20)) + (f0 >> 32);
+    f0 = f0 & u64(0xffffffff);
+    f2 = f2 + u64(std::crypto::load_u32_le(key, 24)) + (f1 >> 32);
+    f1 = f1 & u64(0xffffffff);
+    f3 = f3 + u64(std::crypto::load_u32_le(key, 28)) + (f2 >> 32);
+    f2 = f2 & u64(0xffffffff);
+    std::crypto::store_u32_le(tag, 0, u32(f0));
+    std::crypto::store_u32_le(tag, 4, u32(f1));
+    std::crypto::store_u32_le(tag, 8, u32(f2));
+    std::crypto::store_u32_le(tag, 12, u32(f3));
+    return true;
+}
+
+fn std::crypto::aead_chacha20_poly1305_encrypt(
+    u8* key, u8* nonce,
+    u8* aad, u64 aad_length,
+    u8* plaintext, u64 plaintext_length,
+    u8* ciphertext, u8* tag) -> bool {
+    u8* first_block = malloc(64);
+    std::crypto::chacha20_block(key, u32(0), nonce, first_block);
+    std::crypto::chacha20_xor(
+        key, u32(1), nonce, plaintext, plaintext_length, ciphertext);
+
+    u64 aad_padded = ((aad_length + 15) / 16) * 16;
+    u64 text_padded = ((plaintext_length + 15) / 16) * 16;
+    u64 mac_length = aad_padded + text_padded + 16;
+    u8* mac = malloc(mac_length);
+    u64 index = 0;
+    while (index < aad_length) {
+        mac[index] = aad[index]; index = index + 1;
+    }
+    index = 0;
+    while (index < plaintext_length) {
+        mac[aad_padded + index] = ciphertext[index]; index = index + 1;
+    }
+    std::crypto::store_u64_le(mac, aad_padded + text_padded, aad_length);
+    std::crypto::store_u64_le(
+        mac, aad_padded + text_padded + 8, plaintext_length);
+    std::crypto::poly1305(first_block, mac, mac_length, tag);
+    free(mac);
+    free(first_block);
+    return true;
+}
+
+fn std::crypto::aead_chacha20_poly1305_decrypt(
+    u8* key, u8* nonce,
+    u8* aad, u64 aad_length,
+    u8* ciphertext, u64 ciphertext_length,
+    u8* tag, u8* plaintext) -> bool {
+    u8* first_block = malloc(64);
+    std::crypto::chacha20_block(key, u32(0), nonce, first_block);
+    u64 aad_padded = ((aad_length + 15) / 16) * 16;
+    u64 text_padded = ((ciphertext_length + 15) / 16) * 16;
+    u64 mac_length = aad_padded + text_padded + 16;
+    u8* mac = malloc(mac_length);
+    u64 index = 0;
+    while (index < aad_length) {
+        mac[index] = aad[index]; index = index + 1;
+    }
+    index = 0;
+    while (index < ciphertext_length) {
+        mac[aad_padded + index] = ciphertext[index]; index = index + 1;
+    }
+    std::crypto::store_u64_le(mac, aad_padded + text_padded, aad_length);
+    std::crypto::store_u64_le(
+        mac, aad_padded + text_padded + 8, ciphertext_length);
+    u8* expected = malloc(16);
+    std::crypto::poly1305(first_block, mac, mac_length, expected);
+    u64 differences = 0;
+    index = 0;
+    while (index < 16) {
+        differences = differences | u64(expected[index] ^ tag[index]);
+        index = index + 1;
+    }
+    free(expected);
+    free(mac);
+    free(first_block);
+    if (differences != 0) {
+        return false;
+    }
+    return std::crypto::chacha20_xor(
+        key, u32(1), nonce, ciphertext, ciphertext_length, plaintext);
+}
+
+fn std::crypto::field_copy(i64* output, i64* input) -> bool {
+    u64 index = 0;
+    while (index < 16) {
+        output[index] = input[index];
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::crypto::field_carry(i64* value) -> bool {
+    u64 index = 0;
+    while (index < 16) {
+        value[index] = value[index] + i64(65536);
+        i64 carry = value[index] >> 16;
+        value[index] = value[index] - (carry << 16);
+        if (index < 15) {
+            value[index + 1] = value[index + 1] + carry - 1;
+        } else {
+            value[0] = value[0] + (carry - 1) * 38;
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::crypto::field_select(i64* left, i64* right, u8 swap) -> bool {
+    if (swap != u8(0)) {
+        u64 index = 0;
+        while (index < 16) {
+            i64 temporary = left[index];
+            left[index] = right[index];
+            right[index] = temporary;
+            index = index + 1;
+        }
+    }
+    return true;
+}
+
+fn std::crypto::field_add(i64* output, i64* left, i64* right) -> bool {
+    u64 index = 0;
+    while (index < 16) {
+        output[index] = left[index] + right[index];
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::crypto::field_subtract(
+    i64* output, i64* left, i64* right) -> bool {
+    u64 index = 0;
+    while (index < 16) {
+        output[index] = left[index] - right[index];
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::crypto::field_multiply(
+    i64* output, i64* left, i64* right) -> bool {
+    i64* product = malloc(256);
+    u64 index = 0;
+    while (index < 32) {
+        product[index] = 0;
+        index = index + 1;
+    }
+    index = 0;
+    while (index < 16) {
+        u64 other = 0;
+        while (other < 16) {
+            product[index + other] = product[index + other] +
+                left[index] * right[other];
+            other = other + 1;
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while (index < 15) {
+        product[index] = product[index] + product[index + 16] * 38;
+        index = index + 1;
+    }
+    index = 0;
+    while (index < 16) {
+        output[index] = product[index];
+        index = index + 1;
+    }
+    std::crypto::field_carry(output);
+    std::crypto::field_carry(output);
+    free(product);
+    return true;
+}
+
+fn std::crypto::field_square(i64* output, i64* input) -> bool {
+    return std::crypto::field_multiply(output, input, input);
+}
+
+fn std::crypto::field_unpack(i64* output, u8* input) -> bool {
+    u64 index = 0;
+    while (index < 16) {
+        output[index] = i64(input[index * 2]) +
+            (i64(input[index * 2 + 1]) << 8);
+        index = index + 1;
+    }
+    output[15] = output[15] & i64(0x7fff);
+    return true;
+}
+
+fn std::crypto::field_pack(u8* output, i64* input) -> bool {
+    i64* value = malloc(128);
+    i64* reduced = malloc(128);
+    std::crypto::field_copy(value, input);
+    std::crypto::field_carry(value);
+    std::crypto::field_carry(value);
+    std::crypto::field_carry(value);
+
+    u64 index = 0;
+    u64 pass = 0;
+    while (pass < 2) {
+        reduced[0] = value[0] - i64(0xffed);
+        index = 1;
+        while (index < 15) {
+            reduced[index] = value[index] - i64(0xffff) -
+                ((reduced[index - 1] >> 16) & 1);
+            reduced[index - 1] = reduced[index - 1] & i64(0xffff);
+            index = index + 1;
+        }
+        reduced[15] = value[15] - i64(0x7fff) -
+            ((reduced[14] >> 16) & 1);
+        i64 borrow = (reduced[15] >> 16) & 1;
+        reduced[14] = reduced[14] & i64(0xffff);
+        std::crypto::field_select(value, reduced, u8(1 - borrow));
+        pass = pass + 1;
+    }
+
+    index = 0;
+    while (index < 16) {
+        output[index * 2] = u8(value[index]);
+        output[index * 2 + 1] = u8(value[index] >> 8);
+        index = index + 1;
+    }
+    free(reduced);
+    free(value);
+    return true;
+}
+
+fn std::crypto::field_inverse(i64* output, i64* input) -> bool {
+    i64* value = malloc(128);
+    std::crypto::field_copy(value, input);
+    i64 exponent = 253;
+    while (exponent >= 0) {
+        std::crypto::field_square(value, value);
+        bool multiply = true;
+        if (exponent == 2) { multiply = false; }
+        if (exponent == 4) { multiply = false; }
+        if (multiply) {
+            std::crypto::field_multiply(value, value, input);
+        }
+        exponent = exponent - 1;
+    }
+    std::crypto::field_copy(output, value);
+    free(value);
+    return true;
+}
+
+fn std::crypto::x25519(u8* scalar, u8* point, u8* output) -> bool {
+    u8* clamped = malloc(32);
+    u64 index = 0;
+    while (index < 32) {
+        clamped[index] = scalar[index];
+        index = index + 1;
+    }
+    clamped[0] = clamped[0] & u8(248);
+    clamped[31] = (clamped[31] & u8(127)) | u8(64);
+
+    i64* x = malloc(128);
+    i64* a = malloc(128);
+    i64* b = malloc(128);
+    i64* c = malloc(128);
+    i64* d = malloc(128);
+    i64* e = malloc(128);
+    i64* f = malloc(128);
+    i64* constant = malloc(128);
+    std::crypto::field_unpack(x, point);
+    a[0] = 1;
+    d[0] = 1;
+    constant[0] = i64(0xdb41);
+    constant[1] = 1;
+    index = 0;
+    while (index < 16) {
+        b[index] = x[index];
+        index = index + 1;
+    }
+
+    i64 bit = 254;
+    while (bit >= 0) {
+        u8 swap = (clamped[u64(bit) >> 3] >> u8(u64(bit) & 7)) & u8(1);
+        std::crypto::field_select(a, b, swap);
+        std::crypto::field_select(c, d, swap);
+        std::crypto::field_add(e, a, c);
+        std::crypto::field_subtract(a, a, c);
+        std::crypto::field_add(c, b, d);
+        std::crypto::field_subtract(b, b, d);
+        std::crypto::field_square(d, e);
+        std::crypto::field_square(f, a);
+        std::crypto::field_multiply(a, c, a);
+        std::crypto::field_multiply(c, b, e);
+        std::crypto::field_add(e, a, c);
+        std::crypto::field_subtract(a, a, c);
+        std::crypto::field_square(b, a);
+        std::crypto::field_subtract(c, d, f);
+        std::crypto::field_multiply(a, c, constant);
+        std::crypto::field_add(a, a, d);
+        std::crypto::field_multiply(c, c, a);
+        std::crypto::field_multiply(a, d, f);
+        std::crypto::field_multiply(d, b, x);
+        std::crypto::field_square(b, e);
+        std::crypto::field_select(a, b, swap);
+        std::crypto::field_select(c, d, swap);
+        bit = bit - 1;
+    }
+    std::crypto::field_inverse(c, c);
+    std::crypto::field_multiply(a, a, c);
+    std::crypto::field_pack(output, a);
+
+    free(constant); free(f); free(e); free(d);
+    free(c); free(b); free(a); free(x); free(clamped);
+    return true;
+}

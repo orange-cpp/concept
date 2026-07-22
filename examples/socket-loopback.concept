@@ -42,14 +42,40 @@ fn main() -> int {
 
     i64 sent = client.send("ping");
     string received = peer.recv();
+
+    u8* outgoing = malloc(4);
+    outgoing[0] = u8(0);
+    outgoing[1] = u8(127);
+    outgoing[2] = u8(128);
+    outgoing[3] = u8(255);
+    i64 binary_sent = client.send_bytes(outgoing, 4);
+
+    u8* incoming = malloc(4);
+    i64 binary_received = peer.recv_bytes(incoming, 4);
     peer.close();
     client.close();
     server.close();
 
     if (sent == 4) {
         if (received == "ping") {
-            return 42;
+            if (binary_sent == 4) {
+                if (binary_received == 4) {
+                    if (incoming[0] == u8(0)) {
+                        if (incoming[1] == u8(127)) {
+                            if (incoming[2] == u8(128)) {
+                                if (incoming[3] == u8(255)) {
+                                    free(outgoing);
+                                    free(incoming);
+                                    return 42;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
+    free(outgoing);
+    free(incoming);
     return 7;
 }

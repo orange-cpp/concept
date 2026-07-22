@@ -1,0 +1,663 @@
+// Educational ECDSA verifier implemented entirely in Concept.
+//
+// This module deliberately supports only ecdsa_secp256r1_sha256: NIST P-256,
+// SHA-256, strict DER signatures, and uncompressed 65-byte public keys.
+
+import std::rsa;
+
+fn std::ecdsa::load_prime(u64* value) -> bool {
+    value[0] = u64(0xffff); value[1] = u64(0xffff);
+    value[2] = u64(0xffff); value[3] = u64(0xffff);
+    value[4] = u64(0xffff); value[5] = u64(0xffff);
+    value[6] = u64(0x0000); value[7] = u64(0x0000);
+    value[8] = u64(0x0000); value[9] = u64(0x0000);
+    value[10] = u64(0x0000); value[11] = u64(0x0000);
+    value[12] = u64(0x0001); value[13] = u64(0x0000);
+    value[14] = u64(0xffff); value[15] = u64(0xffff);
+    return true;
+}
+
+fn std::ecdsa::load_order(u64* value) -> bool {
+    value[0] = u64(0x2551); value[1] = u64(0xfc63);
+    value[2] = u64(0xcac2); value[3] = u64(0xf3b9);
+    value[4] = u64(0x9e84); value[5] = u64(0xa717);
+    value[6] = u64(0xfaad); value[7] = u64(0xbce6);
+    value[8] = u64(0xffff); value[9] = u64(0xffff);
+    value[10] = u64(0xffff); value[11] = u64(0xffff);
+    value[12] = u64(0x0000); value[13] = u64(0x0000);
+    value[14] = u64(0xffff); value[15] = u64(0xffff);
+    return true;
+}
+
+fn std::ecdsa::load_generator_x(u64* value) -> bool {
+    value[0] = u64(0xc296); value[1] = u64(0xd898);
+    value[2] = u64(0x3945); value[3] = u64(0xf4a1);
+    value[4] = u64(0x33a0); value[5] = u64(0x2deb);
+    value[6] = u64(0x7d81); value[7] = u64(0x7703);
+    value[8] = u64(0x40f2); value[9] = u64(0x63a4);
+    value[10] = u64(0xe6e5); value[11] = u64(0xf8bc);
+    value[12] = u64(0x4247); value[13] = u64(0xe12c);
+    value[14] = u64(0xd1f2); value[15] = u64(0x6b17);
+    return true;
+}
+
+fn std::ecdsa::load_generator_y(u64* value) -> bool {
+    value[0] = u64(0x51f5); value[1] = u64(0x37bf);
+    value[2] = u64(0x4068); value[3] = u64(0xcbb6);
+    value[4] = u64(0x5ece); value[5] = u64(0x6b31);
+    value[6] = u64(0x3357); value[7] = u64(0x2bce);
+    value[8] = u64(0x9e16); value[9] = u64(0x7c0f);
+    value[10] = u64(0xeb4a); value[11] = u64(0x8ee7);
+    value[12] = u64(0x7f9b); value[13] = u64(0xfe1a);
+    value[14] = u64(0x42e2); value[15] = u64(0x4fe3);
+    return true;
+}
+
+fn std::ecdsa::load_curve_b(u64* value) -> bool {
+    value[0] = u64(0x604b); value[1] = u64(0x27d2);
+    value[2] = u64(0x3c3e); value[3] = u64(0x3bce);
+    value[4] = u64(0xb0f6); value[5] = u64(0xcc53);
+    value[6] = u64(0x06b0); value[7] = u64(0x651d);
+    value[8] = u64(0x86bc); value[9] = u64(0x7698);
+    value[10] = u64(0xbd55); value[11] = u64(0xb3eb);
+    value[12] = u64(0x93e7); value[13] = u64(0xaa3a);
+    value[14] = u64(0x35d8); value[15] = u64(0x5ac6);
+    return true;
+}
+
+fn std::ecdsa::load_prime_minus_two(u64* value) -> bool {
+    std::ecdsa::load_prime(value);
+    value[0] = u64(0xfffd);
+    return true;
+}
+
+fn std::ecdsa::load_order_minus_two(u64* value) -> bool {
+    std::ecdsa::load_order(value);
+    value[0] = u64(0x254f);
+    return true;
+}
+
+fn std::ecdsa::word_inverse(u64* modulus) -> u64 {
+    u64 inverse = 1;
+    u64 index = 0;
+    while (index < 6) {
+        u64 product = (modulus[0] * inverse) & u64(0xffff);
+        inverse = (inverse * (u64(65538) - product)) & u64(0xffff);
+        index = index + 1;
+    }
+    return (u64(65536) - inverse) & u64(0xffff);
+}
+
+fn std::ecdsa::make_r_squared(u64* modulus, u64* output) -> bool {
+    output[0] = 1;
+    u64 index = 0;
+    while (index < 512) {
+        std::rsa::double_mod(output, modulus, 16);
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::ecdsa::bytes_to_limbs(u8* input, u64* output) -> bool {
+    u64 index = 0;
+    while (index < 16) {
+        u64 byte_index = 31 - index * 2;
+        output[index] = u64(input[byte_index]) |
+            (u64(input[byte_index - 1]) << 8);
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::ecdsa::is_zero(u64* value) -> bool {
+    u64 combined = 0;
+    u64 index = 0;
+    while (index < 16) {
+        combined = combined | value[index];
+        index = index + 1;
+    }
+    return combined == 0;
+}
+
+fn std::ecdsa::add_mod(
+    u64* left, u64* right, u64* modulus, u64* output) -> bool {
+    u64 carry = 0;
+    u64 index = 0;
+    while (index < 16) {
+        u64 sum = left[index] + right[index] + carry;
+        output[index] = sum & u64(0xffff);
+        carry = sum >> 16;
+        index = index + 1;
+    }
+    if (carry != 0) {
+        std::rsa::subtract_limbs(output, modulus, 16);
+        return true;
+    }
+    if (std::rsa::compare_limbs(output, modulus, 16) >= 0) {
+        std::rsa::subtract_limbs(output, modulus, 16);
+    }
+    return true;
+}
+
+fn std::ecdsa::subtract_mod(
+    u64* left, u64* right, u64* modulus, u64* output) -> bool {
+    u64 borrow = 0;
+    u64 index = 0;
+    while (index < 16) {
+        u64 subtrahend = right[index] + borrow;
+        if (left[index] < subtrahend) {
+            output[index] = left[index] + u64(65536) - subtrahend;
+            borrow = 1;
+        } else {
+            output[index] = left[index] - subtrahend;
+            borrow = 0;
+        }
+        index = index + 1;
+    }
+    if (borrow != 0) {
+        u64 carry = 0;
+        index = 0;
+        while (index < 16) {
+            u64 sum = output[index] + modulus[index] + carry;
+            output[index] = sum & u64(0xffff);
+            carry = sum >> 16;
+            index = index + 1;
+        }
+    }
+    return true;
+}
+
+fn std::ecdsa::multiply(
+    u64* left, u64* right, u64* modulus, u64 inverse,
+    u64* output) -> bool {
+    return std::rsa::montgomery_multiply(
+        left, right, modulus, 16, inverse, output);
+}
+
+fn std::ecdsa::power(
+    u64* base, u64* exponent, u64* modulus, u64 inverse,
+    u64* r_squared, u64* output) -> bool {
+    u64* one = malloc(128);
+    u64* result = malloc(128);
+    u64* temporary = malloc(128);
+    one[0] = 1;
+    std::ecdsa::multiply(one, r_squared, modulus, inverse, result);
+    u64 bit = 256;
+    while (bit != 0) {
+        bit = bit - 1;
+        std::ecdsa::multiply(
+            result, result, modulus, inverse, temporary);
+        std::rsa::copy_limbs(result, temporary, 16);
+        u64 word = bit / 16;
+        u64 offset = bit % 16;
+        if (((exponent[word] >> u32(offset)) & u64(1)) != 0) {
+            std::ecdsa::multiply(
+                result, base, modulus, inverse, temporary);
+            std::rsa::copy_limbs(result, temporary, 16);
+        }
+    }
+    std::rsa::copy_limbs(output, result, 16);
+    free(temporary);
+    free(result);
+    free(one);
+    return true;
+}
+
+fn std::ecdsa::set_infinity(u64* x, u64* y, u64* z) -> bool {
+    u64 index = 0;
+    while (index < 16) {
+        x[index] = 0;
+        y[index] = 0;
+        z[index] = 0;
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::ecdsa::point_double(
+    u64* x, u64* y, u64* z, u64* modulus, u64 inverse,
+    u64* output_x, u64* output_y, u64* output_z) -> bool {
+    if (std::ecdsa::is_zero(z)) {
+        return std::ecdsa::set_infinity(output_x, output_y, output_z);
+    }
+    if (std::ecdsa::is_zero(y)) {
+        return std::ecdsa::set_infinity(output_x, output_y, output_z);
+    }
+
+    u64* delta = malloc(128);
+    u64* gamma = malloc(128);
+    u64* beta = malloc(128);
+    u64* alpha = malloc(128);
+    u64* first = malloc(128);
+    u64* second = malloc(128);
+    u64* scaled = malloc(128);
+    std::ecdsa::multiply(z, z, modulus, inverse, delta);
+    std::ecdsa::multiply(y, y, modulus, inverse, gamma);
+    std::ecdsa::multiply(x, gamma, modulus, inverse, beta);
+    std::ecdsa::subtract_mod(x, delta, modulus, first);
+    std::ecdsa::add_mod(x, delta, modulus, second);
+    std::ecdsa::multiply(first, second, modulus, inverse, alpha);
+    std::ecdsa::add_mod(alpha, alpha, modulus, first);
+    std::ecdsa::add_mod(first, alpha, modulus, second);
+    std::rsa::copy_limbs(alpha, second, 16);
+
+    std::ecdsa::multiply(alpha, alpha, modulus, inverse, output_x);
+    std::ecdsa::add_mod(beta, beta, modulus, scaled);
+    std::ecdsa::add_mod(scaled, scaled, modulus, first);
+    std::ecdsa::add_mod(first, first, modulus, scaled);
+    std::ecdsa::subtract_mod(output_x, scaled, modulus, first);
+    std::rsa::copy_limbs(output_x, first, 16);
+
+    std::ecdsa::add_mod(y, z, modulus, first);
+    std::ecdsa::multiply(first, first, modulus, inverse, second);
+    std::ecdsa::subtract_mod(second, gamma, modulus, first);
+    std::ecdsa::subtract_mod(first, delta, modulus, output_z);
+
+    std::ecdsa::add_mod(beta, beta, modulus, first);
+    std::ecdsa::add_mod(first, first, modulus, second);
+    std::ecdsa::subtract_mod(second, output_x, modulus, first);
+    std::ecdsa::multiply(alpha, first, modulus, inverse, output_y);
+    std::ecdsa::multiply(gamma, gamma, modulus, inverse, first);
+    std::ecdsa::add_mod(first, first, modulus, second);
+    std::ecdsa::add_mod(second, second, modulus, first);
+    std::ecdsa::add_mod(first, first, modulus, second);
+    std::ecdsa::subtract_mod(output_y, second, modulus, first);
+    std::rsa::copy_limbs(output_y, first, 16);
+
+    free(scaled);
+    free(second);
+    free(first);
+    free(alpha);
+    free(beta);
+    free(gamma);
+    free(delta);
+    return true;
+}
+
+fn std::ecdsa::point_add_mixed(
+    u64* x, u64* y, u64* z, u64* affine_x, u64* affine_y,
+    u64* one_montgomery, u64* modulus, u64 inverse,
+    u64* output_x, u64* output_y, u64* output_z) -> bool {
+    if (std::ecdsa::is_zero(z)) {
+        std::rsa::copy_limbs(output_x, affine_x, 16);
+        std::rsa::copy_limbs(output_y, affine_y, 16);
+        std::rsa::copy_limbs(output_z, one_montgomery, 16);
+        return true;
+    }
+
+    u64* z_squared = malloc(128);
+    u64* u2 = malloc(128);
+    u64* s2 = malloc(128);
+    u64* h = malloc(128);
+    u64* hh = malloc(128);
+    u64* i_value = malloc(128);
+    u64* j_value = malloc(128);
+    u64* r_value = malloc(128);
+    u64* v_value = malloc(128);
+    u64* first = malloc(128);
+    u64* second = malloc(128);
+    std::ecdsa::multiply(z, z, modulus, inverse, z_squared);
+    std::ecdsa::multiply(affine_x, z_squared, modulus, inverse, u2);
+    std::ecdsa::multiply(z, z_squared, modulus, inverse, first);
+    std::ecdsa::multiply(affine_y, first, modulus, inverse, s2);
+    std::ecdsa::subtract_mod(u2, x, modulus, h);
+    if (std::ecdsa::is_zero(h)) {
+        bool same = std::rsa::compare_limbs(s2, y, 16) == 0;
+        free(second); free(first); free(v_value); free(r_value);
+        free(j_value); free(i_value); free(hh); free(h);
+        free(s2); free(u2); free(z_squared);
+        if (same) {
+            return std::ecdsa::point_double(
+                x, y, z, modulus, inverse, output_x, output_y, output_z);
+        }
+        return std::ecdsa::set_infinity(output_x, output_y, output_z);
+    }
+
+    std::ecdsa::multiply(h, h, modulus, inverse, hh);
+    std::ecdsa::add_mod(hh, hh, modulus, first);
+    std::ecdsa::add_mod(first, first, modulus, i_value);
+    std::ecdsa::multiply(h, i_value, modulus, inverse, j_value);
+    std::ecdsa::subtract_mod(s2, y, modulus, first);
+    std::ecdsa::add_mod(first, first, modulus, r_value);
+    std::ecdsa::multiply(x, i_value, modulus, inverse, v_value);
+
+    std::ecdsa::multiply(r_value, r_value, modulus, inverse, output_x);
+    std::ecdsa::subtract_mod(output_x, j_value, modulus, first);
+    std::ecdsa::add_mod(v_value, v_value, modulus, second);
+    std::ecdsa::subtract_mod(first, second, modulus, output_x);
+
+    std::ecdsa::subtract_mod(v_value, output_x, modulus, first);
+    std::ecdsa::multiply(r_value, first, modulus, inverse, output_y);
+    std::ecdsa::multiply(y, j_value, modulus, inverse, first);
+    std::ecdsa::add_mod(first, first, modulus, second);
+    std::ecdsa::subtract_mod(output_y, second, modulus, first);
+    std::rsa::copy_limbs(output_y, first, 16);
+
+    std::ecdsa::add_mod(z, h, modulus, first);
+    std::ecdsa::multiply(first, first, modulus, inverse, second);
+    std::ecdsa::subtract_mod(second, z_squared, modulus, first);
+    std::ecdsa::subtract_mod(first, hh, modulus, output_z);
+
+    free(second); free(first); free(v_value); free(r_value);
+    free(j_value); free(i_value); free(hh); free(h);
+    free(s2); free(u2); free(z_squared);
+    return true;
+}
+
+fn std::ecdsa::simultaneous_multiply(
+    u64* first_scalar, u64* second_scalar,
+    u64* generator_x, u64* generator_y, u64* public_x, u64* public_y,
+    u64* one_montgomery, u64* modulus, u64 inverse,
+    u64* output_x, u64* output_y, u64* output_z) -> bool {
+    u64* x = malloc(128);
+    u64* y = malloc(128);
+    u64* z = malloc(128);
+    u64* next_x = malloc(128);
+    u64* next_y = malloc(128);
+    u64* next_z = malloc(128);
+    std::ecdsa::set_infinity(x, y, z);
+    u64 bit = 256;
+    while (bit != 0) {
+        bit = bit - 1;
+        std::ecdsa::point_double(
+            x, y, z, modulus, inverse, next_x, next_y, next_z);
+        std::rsa::copy_limbs(x, next_x, 16);
+        std::rsa::copy_limbs(y, next_y, 16);
+        std::rsa::copy_limbs(z, next_z, 16);
+        u64 word = bit / 16;
+        u64 offset = bit % 16;
+        if (((first_scalar[word] >> u32(offset)) & u64(1)) != 0) {
+            std::ecdsa::point_add_mixed(
+                x, y, z, generator_x, generator_y, one_montgomery,
+                modulus, inverse, next_x, next_y, next_z);
+            std::rsa::copy_limbs(x, next_x, 16);
+            std::rsa::copy_limbs(y, next_y, 16);
+            std::rsa::copy_limbs(z, next_z, 16);
+        }
+        if (((second_scalar[word] >> u32(offset)) & u64(1)) != 0) {
+            std::ecdsa::point_add_mixed(
+                x, y, z, public_x, public_y, one_montgomery,
+                modulus, inverse, next_x, next_y, next_z);
+            std::rsa::copy_limbs(x, next_x, 16);
+            std::rsa::copy_limbs(y, next_y, 16);
+            std::rsa::copy_limbs(z, next_z, 16);
+        }
+    }
+    std::rsa::copy_limbs(output_x, x, 16);
+    std::rsa::copy_limbs(output_y, y, 16);
+    std::rsa::copy_limbs(output_z, z, 16);
+    free(next_z); free(next_y); free(next_x);
+    free(z); free(y); free(x);
+    return true;
+}
+
+fn std::ecdsa::parse_der_integer(
+    u8* signature, u64 signature_length, u64 cursor, u8* output) -> i64 {
+    if (cursor + 2 > signature_length) {
+        return -1;
+    }
+    if (signature[cursor] != u8(2)) {
+        return -1;
+    }
+    u64 length = u64(signature[cursor + 1]);
+    cursor = cursor + 2;
+    if (length == 0) {
+        return -1;
+    }
+    if (length > 33) {
+        return -1;
+    }
+    if (cursor + length > signature_length) {
+        return -1;
+    }
+    if ((signature[cursor] & u8(0x80)) != u8(0)) {
+        return -1;
+    }
+    u64 start = cursor;
+    u64 effective_length = length;
+    if (signature[cursor] == u8(0)) {
+        if (length == 1) {
+            return -1;
+        }
+        if ((signature[cursor + 1] & u8(0x80)) == u8(0)) {
+            return -1;
+        }
+        start = start + 1;
+        effective_length = effective_length - 1;
+    }
+    if (effective_length > 32) {
+        return -1;
+    }
+    u64 index = 0;
+    while (index < effective_length) {
+        output[32 - effective_length + index] = signature[start + index];
+        index = index + 1;
+    }
+    return i64(cursor + length);
+}
+
+fn std::ecdsa::parse_der_signature(
+    u8* signature, u64 signature_length, u8* r_bytes, u8* s_bytes) -> bool {
+    if (signature_length < 8) {
+        return false;
+    }
+    if (signature_length > 72) {
+        return false;
+    }
+    if (signature[0] != u8(0x30)) {
+        return false;
+    }
+    if (u64(signature[1]) + 2 != signature_length) {
+        return false;
+    }
+    i64 next = std::ecdsa::parse_der_integer(
+        signature, signature_length, 2, r_bytes);
+    if (next < 0) {
+        return false;
+    }
+    next = std::ecdsa::parse_der_integer(
+        signature, signature_length, u64(next), s_bytes);
+    return next == i64(signature_length);
+}
+
+fn std::ecdsa::verify_p256_sha256(
+    u8* public_key, u64 public_key_length,
+    u8* signature, u64 signature_length, u8* message_hash) -> bool {
+    if (public_key_length != 65) {
+        return false;
+    }
+    if (public_key[0] != u8(4)) {
+        return false;
+    }
+    u8* r_bytes = malloc(32);
+    u8* s_bytes = malloc(32);
+    if (!std::ecdsa::parse_der_signature(
+        signature, signature_length, r_bytes, s_bytes)) {
+        free(s_bytes); free(r_bytes);
+        return false;
+    }
+
+    u64* prime = malloc(128);
+    u64* order = malloc(128);
+    u64* r_value = malloc(128);
+    u64* s_value = malloc(128);
+    u64* public_x = malloc(128);
+    u64* public_y = malloc(128);
+    std::ecdsa::load_prime(prime);
+    std::ecdsa::load_order(order);
+    std::ecdsa::bytes_to_limbs(r_bytes, r_value);
+    std::ecdsa::bytes_to_limbs(s_bytes, s_value);
+    std::ecdsa::bytes_to_limbs(public_key + 1, public_x);
+    std::ecdsa::bytes_to_limbs(public_key + 33, public_y);
+    if (std::ecdsa::is_zero(r_value)) {
+        free(public_y); free(public_x); free(s_value); free(r_value);
+        free(order); free(prime); free(s_bytes); free(r_bytes);
+        return false;
+    }
+    if (std::ecdsa::is_zero(s_value)) {
+        free(public_y); free(public_x); free(s_value); free(r_value);
+        free(order); free(prime); free(s_bytes); free(r_bytes);
+        return false;
+    }
+    if (std::rsa::compare_limbs(r_value, order, 16) >= 0) {
+        free(public_y); free(public_x); free(s_value); free(r_value);
+        free(order); free(prime); free(s_bytes); free(r_bytes);
+        return false;
+    }
+    if (std::rsa::compare_limbs(s_value, order, 16) >= 0) {
+        free(public_y); free(public_x); free(s_value); free(r_value);
+        free(order); free(prime); free(s_bytes); free(r_bytes);
+        return false;
+    }
+    if (std::rsa::compare_limbs(public_x, prime, 16) >= 0) {
+        free(public_y); free(public_x); free(s_value); free(r_value);
+        free(order); free(prime); free(s_bytes); free(r_bytes);
+        return false;
+    }
+    if (std::rsa::compare_limbs(public_y, prime, 16) >= 0) {
+        free(public_y); free(public_x); free(s_value); free(r_value);
+        free(order); free(prime); free(s_bytes); free(r_bytes);
+        return false;
+    }
+
+    u64 prime_inverse = std::ecdsa::word_inverse(prime);
+    u64 order_inverse = std::ecdsa::word_inverse(order);
+    u64* prime_r_squared = malloc(128);
+    u64* order_r_squared = malloc(128);
+    u64* one = malloc(128);
+    u64* prime_one = malloc(128);
+    std::ecdsa::make_r_squared(prime, prime_r_squared);
+    std::ecdsa::make_r_squared(order, order_r_squared);
+    one[0] = 1;
+    std::ecdsa::multiply(
+        one, prime_r_squared, prime, prime_inverse, prime_one);
+
+    u64* x_montgomery = malloc(128);
+    u64* y_montgomery = malloc(128);
+    u64* b_normal = malloc(128);
+    u64* b_montgomery = malloc(128);
+    u64* first = malloc(128);
+    u64* second = malloc(128);
+    u64* third = malloc(128);
+    std::ecdsa::multiply(
+        public_x, prime_r_squared, prime, prime_inverse, x_montgomery);
+    std::ecdsa::multiply(
+        public_y, prime_r_squared, prime, prime_inverse, y_montgomery);
+    std::ecdsa::load_curve_b(b_normal);
+    std::ecdsa::multiply(
+        b_normal, prime_r_squared, prime, prime_inverse, b_montgomery);
+    std::ecdsa::multiply(
+        y_montgomery, y_montgomery, prime, prime_inverse, first);
+    std::ecdsa::multiply(
+        x_montgomery, x_montgomery, prime, prime_inverse, second);
+    std::ecdsa::multiply(
+        second, x_montgomery, prime, prime_inverse, third);
+    std::ecdsa::add_mod(x_montgomery, x_montgomery, prime, second);
+    std::ecdsa::add_mod(second, x_montgomery, prime, second);
+    std::ecdsa::subtract_mod(third, second, prime, third);
+    std::ecdsa::add_mod(third, b_montgomery, prime, third);
+    if (std::rsa::compare_limbs(first, third, 16) != 0) {
+        free(third); free(second); free(first); free(b_montgomery);
+        free(b_normal); free(y_montgomery); free(x_montgomery);
+        free(prime_one); free(one); free(order_r_squared);
+        free(prime_r_squared); free(public_y); free(public_x);
+        free(s_value); free(r_value); free(order); free(prime);
+        free(s_bytes); free(r_bytes);
+        return false;
+    }
+
+    u64* order_exponent = malloc(128);
+    u64* s_montgomery = malloc(128);
+    u64* inverse_s = malloc(128);
+    u64* hash_value = malloc(128);
+    u64* hash_montgomery = malloc(128);
+    u64* r_montgomery = malloc(128);
+    u64* first_scalar_montgomery = malloc(128);
+    u64* second_scalar_montgomery = malloc(128);
+    u64* first_scalar = malloc(128);
+    u64* second_scalar = malloc(128);
+    std::ecdsa::load_order_minus_two(order_exponent);
+    std::ecdsa::multiply(
+        s_value, order_r_squared, order, order_inverse, s_montgomery);
+    std::ecdsa::power(
+        s_montgomery, order_exponent, order, order_inverse,
+        order_r_squared, inverse_s);
+    std::ecdsa::bytes_to_limbs(message_hash, hash_value);
+    if (std::rsa::compare_limbs(hash_value, order, 16) >= 0) {
+        std::rsa::subtract_limbs(hash_value, order, 16);
+    }
+    std::ecdsa::multiply(
+        hash_value, order_r_squared, order, order_inverse, hash_montgomery);
+    std::ecdsa::multiply(
+        r_value, order_r_squared, order, order_inverse, r_montgomery);
+    std::ecdsa::multiply(
+        hash_montgomery, inverse_s, order, order_inverse,
+        first_scalar_montgomery);
+    std::ecdsa::multiply(
+        r_montgomery, inverse_s, order, order_inverse,
+        second_scalar_montgomery);
+    std::ecdsa::multiply(
+        first_scalar_montgomery, one, order, order_inverse, first_scalar);
+    std::ecdsa::multiply(
+        second_scalar_montgomery, one, order, order_inverse, second_scalar);
+
+    u64* generator_x = malloc(128);
+    u64* generator_y = malloc(128);
+    u64* generator_x_montgomery = malloc(128);
+    u64* generator_y_montgomery = malloc(128);
+    u64* result_x = malloc(128);
+    u64* result_y = malloc(128);
+    u64* result_z = malloc(128);
+    std::ecdsa::load_generator_x(generator_x);
+    std::ecdsa::load_generator_y(generator_y);
+    std::ecdsa::multiply(
+        generator_x, prime_r_squared, prime, prime_inverse,
+        generator_x_montgomery);
+    std::ecdsa::multiply(
+        generator_y, prime_r_squared, prime, prime_inverse,
+        generator_y_montgomery);
+    std::ecdsa::simultaneous_multiply(
+        first_scalar, second_scalar, generator_x_montgomery,
+        generator_y_montgomery, x_montgomery, y_montgomery, prime_one,
+        prime, prime_inverse, result_x, result_y, result_z);
+
+    bool valid = false;
+    if (!std::ecdsa::is_zero(result_z)) {
+        u64* prime_exponent = malloc(128);
+        u64* inverse_z = malloc(128);
+        u64* inverse_z_squared = malloc(128);
+        u64* affine_x_montgomery = malloc(128);
+        u64* affine_x = malloc(128);
+        std::ecdsa::load_prime_minus_two(prime_exponent);
+        std::ecdsa::power(
+            result_z, prime_exponent, prime, prime_inverse,
+            prime_r_squared, inverse_z);
+        std::ecdsa::multiply(
+            inverse_z, inverse_z, prime, prime_inverse,
+            inverse_z_squared);
+        std::ecdsa::multiply(
+            result_x, inverse_z_squared, prime, prime_inverse,
+            affine_x_montgomery);
+        std::ecdsa::multiply(
+            affine_x_montgomery, one, prime, prime_inverse, affine_x);
+        if (std::rsa::compare_limbs(affine_x, order, 16) >= 0) {
+            std::rsa::subtract_limbs(affine_x, order, 16);
+        }
+        valid = std::rsa::compare_limbs(affine_x, r_value, 16) == 0;
+        free(affine_x); free(affine_x_montgomery);
+        free(inverse_z_squared); free(inverse_z); free(prime_exponent);
+    }
+
+    free(result_z); free(result_y); free(result_x);
+    free(generator_y_montgomery); free(generator_x_montgomery);
+    free(generator_y); free(generator_x); free(second_scalar);
+    free(first_scalar); free(second_scalar_montgomery);
+    free(first_scalar_montgomery); free(r_montgomery);
+    free(hash_montgomery); free(hash_value); free(inverse_s);
+    free(s_montgomery); free(order_exponent); free(third); free(second);
+    free(first); free(b_montgomery); free(b_normal); free(y_montgomery);
+    free(x_montgomery); free(prime_one); free(one); free(order_r_squared);
+    free(prime_r_squared); free(public_y); free(public_x); free(s_value);
+    free(r_value); free(order); free(prime); free(s_bytes); free(r_bytes);
+    return valid;
+}

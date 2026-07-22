@@ -13,6 +13,8 @@
 #include <cstring>
 #include <limits>
 #include <iostream>
+#include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -670,6 +672,44 @@ std::int64_t send_tcp_text(const NativeSocket handle,
     return static_cast<std::int64_t>(sent);
 }
 
+std::int64_t send_tcp_bytes(
+    const NativeSocket handle, const std::span<const std::uint8_t> bytes) {
+    if (handle == invalid_socket) {
+        return -1;
+    }
+
+    std::size_t sent = 0;
+    while (sent < bytes.size()) {
+        const auto remaining = bytes.size() - sent;
+        const auto chunk = static_cast<int>(std::min<std::size_t>(
+            remaining,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+        const auto result = platform_send(
+            handle, reinterpret_cast<const char*>(bytes.data() + sent), chunk,
+            send_flags);
+        if (result <= 0) {
+            return sent == 0 ? -1 : static_cast<std::int64_t>(sent);
+        }
+        sent += static_cast<std::size_t>(result);
+    }
+    return static_cast<std::int64_t>(sent);
+}
+
+std::int64_t receive_tcp_bytes(const NativeSocket handle,
+                               const std::span<std::uint8_t> bytes) {
+    if (handle == invalid_socket) {
+        return -1;
+    }
+    if (bytes.empty()) {
+        return 0;
+    }
+    const auto count = static_cast<int>(std::min<std::size_t>(
+        bytes.size(),
+        static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    return platform_receive(handle, reinterpret_cast<char*>(bytes.data()),
+                            count, 0);
+}
+
 std::string receive_tcp_text(const NativeSocket handle) {
     if (handle == invalid_socket) {
         return {};
@@ -940,6 +980,28 @@ std::uint64_t integral_arithmetic(const Op op, const ValueType type,
                       : lhs - rhs);
     case Op::multiply:
         return normalize_integral(type, lhs * rhs);
+    case Op::bit_and:
+        return normalize_integral(type, lhs & rhs);
+    case Op::bit_or:
+        return normalize_integral(type, lhs | rhs);
+    case Op::bit_xor:
+        return normalize_integral(type, lhs ^ rhs);
+    case Op::shift_left:
+    case Op::shift_right: {
+        const auto width = integral_width(type);
+        if (rhs >= width) {
+            throw std::runtime_error(
+                xorstr_("Concept shift count is out of range"));
+        }
+        if (op == Op::shift_left) {
+            return normalize_integral(type, lhs << rhs);
+        }
+        if (is_signed_integral(type)) {
+            return normalize_integral(
+                type, static_cast<std::uint64_t>(signed_value(type, lhs) >> rhs));
+        }
+        return normalize_integral(type, lhs >> rhs);
+    }
     case Op::divide:
     case Op::modulo:
         if (rhs == 0) {
@@ -1513,6 +1575,33 @@ std::int64_t execute(const Bytecode& bytecode) {
         }
     };
 
+    const auto byte_span = [&](const std::uint64_t handle,
+                               const std::uint64_t count) {
+        if (count == 0) {
+            return std::span<std::uint8_t>{};
+        }
+        if (count > std::numeric_limits<std::size_t>::max()) {
+            throw std::runtime_error(
+                xorstr_("Concept binary buffer length is too large"));
+        }
+        const auto& target = pointer_target(handle);
+        if (target.kind != PointerTarget::Kind::heap_block ||
+            target.native_type != ValueType::u8) {
+            throw std::runtime_error(
+                xorstr_("Concept binary buffer requires VM u8 storage"));
+        }
+        auto& block = heap_block(target.owner);
+        const auto size = static_cast<std::size_t>(count);
+        if (target.index > block.bytes.size() ||
+            size > block.bytes.size() -
+                       static_cast<std::size_t>(target.index)) {
+            throw std::runtime_error(
+                xorstr_("Concept binary buffer is out of bounds"));
+        }
+        return std::span<std::uint8_t>(
+            block.bytes.data() + static_cast<std::size_t>(target.index), size);
+    };
+
     for (;;) {
         const auto& vm = select_vm();
         const auto instruction_offset = ip;
@@ -1781,6 +1870,22 @@ std::int64_t execute(const Bytecode& bytecode) {
                 arithmetic(op, type, left, right, substituted));
             break;
         }
+        case Op::bit_and:
+        case Op::bit_or:
+        case Op::bit_xor:
+        case Op::shift_left:
+        case Op::shift_right: {
+            const auto type = read_type(bytecode.code, ip);
+            const auto [left, right] = pop_binary(reordered);
+            stack.push_back(integral_arithmetic(op, type, left, right,
+                                                substituted));
+            break;
+        }
+        case Op::bit_not: {
+            const auto type = read_type(bytecode.code, ip);
+            stack.push_back(normalize_integral(type, ~pop()));
+            break;
+        }
         case Op::negate: {
             const auto type = read_type(bytecode.code, ip);
             const auto value = pop();
@@ -1900,6 +2005,51 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::input_f64:
             stack.push_back(f64_bits(read_input_f64()));
             break;
+        case Op::entropy_fill: {
+            const auto count = pop();
+            const auto pointer = pop();
+            auto bytes = byte_span(pointer, count);
+            std::random_device entropy;
+            std::size_t offset = 0;
+            while (offset < bytes.size()) {
+                auto value = entropy();
+                for (std::size_t byte = 0;
+                     byte < sizeof(value) && offset < bytes.size(); ++byte) {
+                    bytes[offset++] = static_cast<std::uint8_t>(value);
+                    value >>= 8;
+                }
+            }
+            stack.push_back(1);
+            break;
+        }
+        case Op::text_length:
+            stack.push_back(text_value(text_heap, pop()).size());
+            break;
+        case Op::text_byte: {
+            const auto index = pop();
+            const auto text = pop();
+            const auto& value = text_value(text_heap, text);
+            if (index >= value.size()) {
+                throw std::runtime_error(
+                    xorstr_("Concept string byte index is out of bounds"));
+            }
+            stack.push_back(static_cast<std::uint8_t>(
+                value[static_cast<std::size_t>(index)]));
+            break;
+        }
+        case Op::text_from_bytes: {
+            const auto count = pop();
+            const auto pointer = pop();
+            const auto bytes = byte_span(pointer, count);
+            if (bytes.empty()) {
+                text_heap.emplace_back();
+            } else {
+                text_heap.emplace_back(
+                    reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            }
+            stack.push_back(text_heap.size() - 1);
+            break;
+        }
         case Op::print:
         case Op::println: {
             const auto type = read_type(bytecode.code, ip);
@@ -1978,6 +2128,22 @@ std::int64_t execute(const Bytecode& bytecode) {
             text_heap.push_back(receive_tcp_text(native_socket(pop())));
             stack.push_back(text_heap.size() - 1);
             break;
+        case Op::socket_send_bytes: {
+            const auto count = pop();
+            const auto pointer = pop();
+            const auto handle = native_socket(pop());
+            stack.push_back(static_cast<std::uint64_t>(
+                send_tcp_bytes(handle, byte_span(pointer, count))));
+            break;
+        }
+        case Op::socket_receive_bytes: {
+            const auto count = pop();
+            const auto pointer = pop();
+            const auto handle = native_socket(pop());
+            stack.push_back(static_cast<std::uint64_t>(
+                receive_tcp_bytes(handle, byte_span(pointer, count))));
+            break;
+        }
         case Op::socket_close: {
             const auto handle = native_socket(pop());
             stack.push_back(handle != invalid_socket &&

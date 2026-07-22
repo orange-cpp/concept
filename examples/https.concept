@@ -1,0 +1,49 @@
+import std::https;
+
+fn hex_digit(u8 value) -> u8 {
+    if (value >= u8(48)) {
+        if (value <= u8(57)) {
+            return value - u8(48);
+        }
+    }
+    return value - u8(87);
+}
+
+fn decode_hex(string value, u8* output) -> bool {
+    u64 count = string_length(value) / 2;
+    u64 index = 0;
+    while (index < count) {
+        output[index] = (hex_digit(string_byte(value, index * 2)) << 4) |
+            hex_digit(string_byte(value, index * 2 + 1));
+        index = index + 1;
+    }
+    return true;
+}
+
+fn main() -> int {
+    u8* certificate_pin = malloc(32);
+    u8* rsa_modulus = malloc(256);
+    decode_hex(
+        "a7b5991507fde30924bc14aaf77a1b2ab70eeb67dcd7e51eb00c8562bc84e7cc",
+        certificate_pin);
+    decode_hex(
+        "e034c8b084c1fff367b44a907805d0a27721f4670c14b08ecd5a53a4bdd49d12ce6665b86180e06e5e85e555d147ebbbb1f8860ab176d52ab85215476a812aa45fb5d7e9a72af0596f6d259b6ce1686284bb6892b3553d30dae01e7f9267dd4ab602e8074e78c9d38db00b5742e22f4982e72a40fc075a65ff276098d101de066438da21a1bee5ae26cb51395764953df6fb2c36012c2cace2a4e9cb3939cdfc000dc719ab9eee66490821b43b6c1fbe9c07017a61c4fc741fab8513fd22580d4f32b76dfa78f2c9696e3173f65a786461219e2c6f739854fd68d2a15d0846fdfa1138f6292e91e2279aa3cd918cf058b155e7568d888c2152c0836c700b023b",
+        rsa_modulus);
+
+    std::https request;
+    request.host = "localhost";
+    request.path = "/";
+    request.port = u16(9443);
+    request.certificate_sha256 = certificate_pin;
+    request.certificate_sha256_length = 32;
+    request.rsa_modulus = rsa_modulus;
+    request.rsa_modulus_length = 256;
+    if (!request.get()) {
+        print(request.error);
+        return 1;
+    }
+    print(request.response);
+    free(rsa_modulus);
+    free(certificate_pin);
+    return 42;
+}

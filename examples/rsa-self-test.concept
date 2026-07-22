@@ -1,0 +1,43 @@
+import std::rsa;
+
+fn hex_digit(u8 value) -> u8 {
+    if (value >= u8(48)) {
+        if (value <= u8(57)) {
+            return value - u8(48);
+        }
+    }
+    return value - u8(87);
+}
+
+fn decode_hex(string value, u8* output) -> bool {
+    u64 count = string_length(value) / 2;
+    u64 index = 0;
+    while (index < count) {
+        output[index] = (hex_digit(string_byte(value, index * 2)) << 4) |
+            hex_digit(string_byte(value, index * 2 + 1));
+        index = index + 1;
+    }
+    return true;
+}
+
+fn main() -> int {
+    u8* modulus = malloc(256);
+    u8* signature = malloc(256);
+    u8* message_hash = malloc(32);
+    decode_hex("a92f418aace60842c4520903c90668784902c3b0df79f0d5c41e1e4f0d1c886d82e4457f76870e1fc781c202b97094d96271fb34d7a14042f73020604793540f395ce48977579f20e10260720244b9a3f42129c211148d02bc667e076887da0e423ca3c5ab4025234649467163a83e4c67168c2ef309ce04c5c4072884f0d8cdd8c4c5a146561dfff630e5caa1b8e193041b4488f1ed45096edf8e654fbf6ade658f8790565d81d85023c60b0000ccd64a87929ea1ae8e93a8184c3646ca00ef09b7b9c2efe8c91938a3c259bfb2bbb6de4a0ce8201c6293721e200c2cdfeb3098ac18d2ecaaee8263c78652480116ae91b7fe930b3646eedd7e8e4d84e265a5", modulus);
+    decode_hex("68c31df086c8d04d7da8265376ce8b4fac99b46197796ebe696b24ac9591392c0be8bfc0f23b4e6d6a808745c1320b548c54252d98fa615d7d2e14085000a83b5e6f591ef7ed696727641d79bd35f8325c3cb07d2f0c383f68d5abdfdd2581218dc35e7e61db526b1d96141487442f15e552a1a3216fdf8531197d4a54282ec50d191fba981167ef93f31d41309c05cbc749f00ca974bed2f4c6f4d193fcdcc5fb40e5988f29f641c23317f51e75f9ac0f5bed86ce4440e18065dd35e86deb0ed54b9899648f06b8f38707f890fcf207b641db566588acdf71ee4ffcb3cbf4b0f936ed98f96429b1f7fcc1581c34b57c610207d7085a965d0fa3e90a00262b2d", signature);
+    decode_hex("c3711e45140fab85d92254549204333433eca749cca5df3c2ff9703fe8ca9a36", message_hash);
+    if (!std::rsa::verify_pss_sha256(
+        modulus, 256, signature, 256, message_hash)) {
+        return 1;
+    }
+    signature[0] = signature[0] ^ u8(1);
+    if (std::rsa::verify_pss_sha256(
+        modulus, 256, signature, 256, message_hash)) {
+        return 2;
+    }
+    free(message_hash);
+    free(signature);
+    free(modulus);
+    return 42;
+}

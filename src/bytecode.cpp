@@ -18,7 +18,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 16;
+constexpr std::uint32_t bytecode_version = 18;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -89,6 +89,12 @@ std::size_t operand_size(const Op op) {
     case Op::multiply:
     case Op::divide:
     case Op::modulo:
+    case Op::bit_and:
+    case Op::bit_or:
+    case Op::bit_xor:
+    case Op::shift_left:
+    case Op::shift_right:
+    case Op::bit_not:
     case Op::negate:
     case Op::logical_not:
     case Op::equal:
@@ -112,6 +118,10 @@ std::size_t operand_size(const Op op) {
     case Op::input_text:
     case Op::input_i64:
     case Op::input_f64:
+    case Op::entropy_fill:
+    case Op::text_length:
+    case Op::text_byte:
+    case Op::text_from_bytes:
     case Op::native_call:
     case Op::socket_open:
     case Op::socket_connect:
@@ -120,6 +130,8 @@ std::size_t operand_size(const Op op) {
     case Op::socket_accept:
     case Op::socket_send:
     case Op::socket_receive:
+    case Op::socket_send_bytes:
+    case Op::socket_receive_bytes:
     case Op::socket_close:
     case Op::return_value:
         return 0;
@@ -653,6 +665,13 @@ void validate(const Bytecode& bytecode) {
             if (op == Op::modulo && !is_integral(type)) {
                 throw std::runtime_error(xorstr_(
                     "non-integral modulo type in Concept bytecode"));
+            }
+            if ((op == Op::bit_and || op == Op::bit_or ||
+                 op == Op::bit_xor || op == Op::shift_left ||
+                 op == Op::shift_right || op == Op::bit_not) &&
+                !is_integral(type)) {
+                throw std::runtime_error(xorstr_(
+                    "non-integral bitwise type in Concept bytecode"));
             }
         }
 

@@ -1,0 +1,913 @@
+// Educational, pure-Concept TLS 1.3 HTTPS client.
+//
+// Supported profile: X25519, TLS_CHACHA20_POLY1305_SHA256, and either
+// rsa_pss_rsae_sha256 with a 2048-bit RSA key or
+// ecdsa_secp256r1_sha256 with a 65-byte uncompressed P-256 public key.
+// Authentication also requires a SHA-256 pin of the leaf certificate DER.
+
+import std::ecdsa;
+import std::socket;
+
+fn std::tls::equal(u8* left, u8* right, u64 count) -> bool {
+    u64 differences = 0;
+    u64 index = 0;
+    while (index < count) {
+        differences = differences | u64(left[index] ^ right[index]);
+        index = index + 1;
+    }
+    return differences == 0;
+}
+
+fn std::tls::patch_u16(std::bytes value, u64 index, u16 number) -> bool {
+    if (index + 2 > value.length) {
+        return false;
+    }
+    value.data[index] = u8(number >> 8);
+    value.data[index + 1] = u8(number);
+    return true;
+}
+
+fn std::tls::receive_exact(
+    std::Socket connection, u8* output, u64 count) -> bool {
+    u64 received = 0;
+    while (received < count) {
+        i64 part = connection.recv_bytes(output + received, count - received);
+        if (part <= 0) {
+            return false;
+        }
+        received = received + u64(part);
+    }
+    return true;
+}
+
+fn std::tls::receive_record(
+    std::Socket connection, u8* header, std::bytes body) -> i32 {
+    if (!std::tls::receive_exact(connection, header, 5)) {
+        return -1;
+    }
+    if (header[1] != u8(3)) {
+        return -1;
+    }
+    if (header[2] != u8(3)) {
+        return -1;
+    }
+    u64 length = (u64(header[3]) << 8) | u64(header[4]);
+    if (length == 0) {
+        return -1;
+    }
+    if (length > 16640) {
+        return -1;
+    }
+    body.clear();
+    if (!body.resize(length)) {
+        return -1;
+    }
+    if (!std::tls::receive_exact(connection, body.data, length)) {
+        return -1;
+    }
+    return i32(header[0]);
+}
+
+fn std::tls::send_plain_handshake(
+    std::Socket connection, std::bytes handshake) -> bool {
+    if (handshake.length > 65535) {
+        return false;
+    }
+    std::bytes record;
+    record.append(u8(22));
+    record.append(u8(3));
+    record.append(u8(1));
+    record.append_u16(u16(handshake.length));
+    record.append_bytes(handshake.data, handshake.length);
+    bool sent = connection.send_bytes(record.data, record.length) ==
+        i64(record.length);
+    record.destroy();
+    return sent;
+}
+
+fn std::tls::make_nonce(u8* iv, u64 sequence, u8* nonce) -> bool {
+    u64 index = 0;
+    while (index < 12) {
+        nonce[index] = iv[index];
+        index = index + 1;
+    }
+    index = 0;
+    while (index < 8) {
+        nonce[11 - index] = nonce[11 - index] ^ u8(sequence >> u32(index * 8));
+        index = index + 1;
+    }
+    return true;
+}
+
+fn std::tls::send_encrypted(
+    std::Socket connection, u8* key, u8* iv, u64 sequence,
+    u8 content_type, u8* content, u64 content_length) -> bool {
+    if (content_length > 16384) {
+        return false;
+    }
+    u64 plaintext_length = content_length + 1;
+    u64 record_length = plaintext_length + 16;
+    u8* plaintext = malloc(plaintext_length);
+    u64 index = 0;
+    while (index < content_length) {
+        plaintext[index] = content[index];
+        index = index + 1;
+    }
+    plaintext[content_length] = content_type;
+
+    std::bytes record;
+    record.resize(5 + record_length);
+    record.data[0] = u8(23);
+    record.data[1] = u8(3);
+    record.data[2] = u8(3);
+    record.data[3] = u8(record_length >> 8);
+    record.data[4] = u8(record_length);
+    u8* nonce = malloc(12);
+    std::tls::make_nonce(iv, sequence, nonce);
+    bool encrypted = std::crypto::aead_chacha20_poly1305_encrypt(
+        key, nonce, record.data, 5, plaintext, plaintext_length,
+        record.data + 5, record.data + 5 + plaintext_length);
+    bool sent = false;
+    if (encrypted) {
+        sent = connection.send_bytes(record.data, record.length) ==
+            i64(record.length);
+    }
+    free(nonce);
+    record.destroy();
+    free(plaintext);
+    return sent;
+}
+
+fn std::tls::decrypt_record(
+    u8* header, std::bytes record, u8* key, u8* iv, u64 sequence,
+    std::bytes plaintext) -> i32 {
+    if (record.length < 17) {
+        return -1;
+    }
+    u64 ciphertext_length = record.length - 16;
+    plaintext.clear();
+    plaintext.resize(ciphertext_length);
+    u8* nonce = malloc(12);
+    std::tls::make_nonce(iv, sequence, nonce);
+    bool valid = std::crypto::aead_chacha20_poly1305_decrypt(
+        key, nonce, header, 5, record.data, ciphertext_length,
+        record.data + ciphertext_length, plaintext.data);
+    free(nonce);
+    if (!valid) {
+        return -1;
+    }
+    u64 end = ciphertext_length;
+    while (end != 0) {
+        if (plaintext.data[end - 1] != u8(0)) {
+            i32 content_type = i32(plaintext.data[end - 1]);
+            plaintext.length = end - 1;
+            return content_type;
+        }
+        end = end - 1;
+    }
+    return -1;
+}
+
+fn std::tls::build_client_hello(
+    string host, bool enable_ecdsa, bool enable_rsa,
+    u8* random, u8* session_id, u8* public_key,
+    std::bytes handshake) -> bool {
+    u64 host_length = string_length(host);
+    if (host_length == 0) {
+        return false;
+    }
+    if (host_length > 250) {
+        return false;
+    }
+
+    std::bytes body;
+    body.append_u16(u16(0x0303));
+    body.append_bytes(random, 32);
+    body.append(u8(32));
+    body.append_bytes(session_id, 32);
+    body.append_u16(u16(2));
+    body.append_u16(u16(0x1303));
+    body.append(u8(1));
+    body.append(u8(0));
+    u64 extensions_length_index = body.length;
+    body.append_u16(u16(0));
+    u64 extensions_start = body.length;
+
+    body.append_u16(u16(0x0000));
+    body.append_u16(u16(host_length + 5));
+    body.append_u16(u16(host_length + 3));
+    body.append(u8(0));
+    body.append_u16(u16(host_length));
+    body.append_text(host);
+
+    body.append_u16(u16(0x002b));
+    body.append_u16(u16(3));
+    body.append(u8(2));
+    body.append_u16(u16(0x0304));
+
+    body.append_u16(u16(0x000a));
+    body.append_u16(u16(4));
+    body.append_u16(u16(2));
+    body.append_u16(u16(0x001d));
+
+    body.append_u16(u16(0x000d));
+    u16 signature_algorithms_length = u16(0);
+    if (enable_ecdsa) {
+        signature_algorithms_length = signature_algorithms_length + u16(2);
+    }
+    if (enable_rsa) {
+        signature_algorithms_length = signature_algorithms_length + u16(2);
+    }
+    body.append_u16(signature_algorithms_length + u16(2));
+    body.append_u16(signature_algorithms_length);
+    if (enable_ecdsa) {
+        body.append_u16(u16(0x0403));
+    }
+    if (enable_rsa) {
+        body.append_u16(u16(0x0804));
+    }
+
+    body.append_u16(u16(0x0033));
+    body.append_u16(u16(38));
+    body.append_u16(u16(36));
+    body.append_u16(u16(0x001d));
+    body.append_u16(u16(32));
+    body.append_bytes(public_key, 32);
+    std::tls::patch_u16(
+        body, extensions_length_index,
+        u16(body.length - extensions_start));
+
+    handshake.clear();
+    handshake.append(u8(1));
+    handshake.append_u24(u32(body.length));
+    handshake.append_bytes(body.data, body.length);
+    body.destroy();
+    return true;
+}
+
+fn std::tls::parse_server_hello(
+    std::bytes handshake, u8* session_id, u8* server_key) -> bool {
+    if (handshake.length < 44) {
+        return false;
+    }
+    if (handshake.data[0] != u8(2)) {
+        return false;
+    }
+    u64 declared = (u64(handshake.data[1]) << 16) |
+        (u64(handshake.data[2]) << 8) | u64(handshake.data[3]);
+    if (declared + 4 != handshake.length) {
+        return false;
+    }
+    if (handshake.read_u16(4) != u16(0x0303)) {
+        return false;
+    }
+    u64 cursor = 38;
+    u64 session_length = u64(handshake.data[cursor]);
+    cursor = cursor + 1;
+    if (session_length != 32) {
+        return false;
+    }
+    if (cursor + session_length + 5 > handshake.length) {
+        return false;
+    }
+    if (!std::tls::equal(handshake.data + cursor, session_id, 32)) {
+        return false;
+    }
+    cursor = cursor + session_length;
+    if (handshake.read_u16(cursor) != u16(0x1303)) {
+        return false;
+    }
+    cursor = cursor + 2;
+    if (handshake.data[cursor] != u8(0)) {
+        return false;
+    }
+    cursor = cursor + 1;
+    u64 extensions_length = u64(handshake.read_u16(cursor));
+    cursor = cursor + 2;
+    if (cursor + extensions_length != handshake.length) {
+        return false;
+    }
+    u64 extensions_end = cursor + extensions_length;
+    bool version_found = false;
+    bool key_found = false;
+    while (cursor < extensions_end) {
+        if (cursor + 4 > extensions_end) {
+            return false;
+        }
+        u16 extension_type = handshake.read_u16(cursor);
+        u64 extension_length = u64(handshake.read_u16(cursor + 2));
+        cursor = cursor + 4;
+        if (cursor + extension_length > extensions_end) {
+            return false;
+        }
+        if (extension_type == u16(0x002b)) {
+            if (extension_length != 2) {
+                return false;
+            }
+            if (handshake.read_u16(cursor) != u16(0x0304)) {
+                return false;
+            }
+            version_found = true;
+        }
+        if (extension_type == u16(0x0033)) {
+            if (extension_length != 36) {
+                return false;
+            }
+            if (handshake.read_u16(cursor) != u16(0x001d)) {
+                return false;
+            }
+            if (handshake.read_u16(cursor + 2) != u16(32)) {
+                return false;
+            }
+            u64 key_index = 0;
+            while (key_index < 32) {
+                server_key[key_index] = handshake.data[cursor + 4 + key_index];
+                key_index = key_index + 1;
+            }
+            key_found = true;
+        }
+        cursor = cursor + extension_length;
+    }
+    if (!version_found) {
+        return false;
+    }
+    return key_found;
+}
+
+fn std::tls::verify_leaf_certificate(
+    u8* message, u64 message_length, u8* expected_hash) -> bool {
+    if (message_length < 12) {
+        return false;
+    }
+    u64 context_length = u64(message[4]);
+    u64 cursor = 5 + context_length;
+    if (cursor + 3 > message_length) {
+        return false;
+    }
+    u64 list_length = (u64(message[cursor]) << 16) |
+        (u64(message[cursor + 1]) << 8) | u64(message[cursor + 2]);
+    cursor = cursor + 3;
+    if (cursor + list_length != message_length) {
+        return false;
+    }
+    if (list_length < 5) {
+        return false;
+    }
+    u64 certificate_length = (u64(message[cursor]) << 16) |
+        (u64(message[cursor + 1]) << 8) | u64(message[cursor + 2]);
+    cursor = cursor + 3;
+    if (cursor + certificate_length + 2 > message_length) {
+        return false;
+    }
+    u64 extensions_length = (u64(message[cursor + certificate_length]) << 8) |
+        u64(message[cursor + certificate_length + 1]);
+    if (cursor + certificate_length + 2 + extensions_length > message_length) {
+        return false;
+    }
+    u8* actual_hash = malloc(32);
+    std::crypto::sha256(message + cursor, certificate_length, actual_hash);
+    bool valid = std::tls::equal(actual_hash, expected_hash, 32);
+    free(actual_hash);
+    return valid;
+}
+
+fn std::tls::verify_certificate_signature(
+    std::bytes transcript, u8* message, u64 message_length,
+    u8* rsa_modulus, u64 rsa_modulus_length,
+    u8* ecdsa_public_key, u64 ecdsa_public_key_length) -> bool {
+    if (message_length < 12) {
+        return false;
+    }
+    if (message[0] != u8(15)) {
+        return false;
+    }
+    u64 declared_length = (u64(message[1]) << 16) |
+        (u64(message[2]) << 8) | u64(message[3]);
+    if (declared_length + 4 != message_length) {
+        return false;
+    }
+    u16 scheme = (u16(message[4]) << 8) | u16(message[5]);
+    u64 signature_length = (u64(message[6]) << 8) | u64(message[7]);
+    if (signature_length + 8 != message_length) {
+        return false;
+    }
+
+    u8* transcript_hash = malloc(32);
+    std::crypto::sha256(transcript.data, transcript.length, transcript_hash);
+    std::bytes signed_content;
+    u64 index = 0;
+    while (index < 64) {
+        signed_content.append(u8(0x20));
+        index = index + 1;
+    }
+    signed_content.append_text("TLS 1.3, server CertificateVerify");
+    signed_content.append(u8(0));
+    signed_content.append_bytes(transcript_hash, 32);
+    u8* signed_hash = malloc(32);
+    std::crypto::sha256(
+        signed_content.data, signed_content.length, signed_hash);
+    bool valid = false;
+    if (scheme == u16(0x0804)) {
+        if (rsa_modulus_length == 256) {
+            valid = std::rsa::verify_pss_sha256(
+                rsa_modulus, rsa_modulus_length, message + 8,
+                signature_length, signed_hash);
+        }
+    }
+    if (scheme == u16(0x0403)) {
+        if (ecdsa_public_key_length == 65) {
+            valid = std::ecdsa::verify_p256_sha256(
+                ecdsa_public_key, ecdsa_public_key_length, message + 8,
+                signature_length, signed_hash);
+        }
+    }
+    free(signed_hash);
+    signed_content.destroy();
+    free(transcript_hash);
+    return valid;
+}
+
+fn std::tls::verify_finished(
+    std::bytes transcript, u8* message, u64 message_length,
+    u8* traffic_secret) -> bool {
+    if (message_length != 36) {
+        return false;
+    }
+    if (message[0] != u8(20)) {
+        return false;
+    }
+    u8* transcript_hash = malloc(32);
+    u8* finished_key = malloc(32);
+    u8* expected = malloc(32);
+    std::crypto::sha256(transcript.data, transcript.length, transcript_hash);
+    std::crypto::hkdf_expand_label(
+        traffic_secret, "finished", transcript_hash, 0, finished_key, 32);
+    std::crypto::hmac_sha256(
+        finished_key, 32, transcript_hash, 32, expected);
+    bool valid = std::tls::equal(expected, message + 4, 32);
+    free(expected);
+    free(finished_key);
+    free(transcript_hash);
+    return valid;
+}
+
+fn std::tls::derive_key_iv(u8* traffic_secret, u8* key, u8* iv) -> bool {
+    u8* empty = traffic_secret;
+    std::crypto::hkdf_expand_label(
+        traffic_secret, "key", empty, 0, key, 32);
+    std::crypto::hkdf_expand_label(
+        traffic_secret, "iv", empty, 0, iv, 12);
+    return true;
+}
+
+class std::https {
+    string host;
+    string path;
+    u16 port;
+    u8* certificate_sha256;
+    u64 certificate_sha256_length;
+    u8* rsa_modulus;
+    u64 rsa_modulus_length;
+    u8* ecdsa_public_key;
+    u64 ecdsa_public_key_length;
+    string response;
+    string error;
+
+    fn get() -> bool {
+        this.response = "";
+        this.error = "";
+        if (this.host == "") {
+            this.error = "host is required";
+            return false;
+        }
+        if (this.path == "") {
+            this.path = "/";
+        }
+        if (this.port == u16(0)) {
+            this.port = u16(443);
+        }
+        if (this.certificate_sha256_length != 32) {
+            this.error = "a 32-byte leaf certificate pin is required";
+            return false;
+        }
+        bool rsa_enabled = this.rsa_modulus_length == 256;
+        bool ecdsa_enabled = this.ecdsa_public_key_length == 65;
+        bool authentication_available = rsa_enabled;
+        if (ecdsa_enabled) {
+            authentication_available = true;
+        }
+        if (!authentication_available) {
+            this.error = "an RSA or P-256 authentication pin is required";
+            return false;
+        }
+
+        std::Socket connection = std::Socket();
+        if (!connection.valid()) {
+            this.error = "socket creation failed";
+            return false;
+        }
+        if (!connection.connect(this.host, this.port)) {
+            this.error = "TCP connection failed";
+            connection.close();
+            return false;
+        }
+
+        u8* client_random = malloc(32);
+        u8* session_id = malloc(32);
+        u8* private_key = malloc(32);
+        u8* basepoint = malloc(32);
+        u8* client_public_key = malloc(32);
+        bool entropy_ready = entropy_fill(client_random, 32);
+        if (!entropy_fill(session_id, 32)) {
+            entropy_ready = false;
+        }
+        if (!entropy_fill(private_key, 32)) {
+            entropy_ready = false;
+        }
+        if (!entropy_ready) {
+            this.error = "host entropy failed";
+            connection.close();
+            return false;
+        }
+        basepoint[0] = u8(9);
+        std::crypto::x25519(private_key, basepoint, client_public_key);
+
+        std::bytes client_hello;
+        if (!std::tls::build_client_hello(
+            this.host, ecdsa_enabled, rsa_enabled, client_random,
+            session_id, client_public_key, client_hello)) {
+            this.error = "ClientHello construction failed";
+            connection.close();
+            return false;
+        }
+        if (!std::tls::send_plain_handshake(connection, client_hello)) {
+            this.error = "ClientHello send failed";
+            connection.close();
+            return false;
+        }
+
+        u8* record_header = malloc(5);
+        std::bytes record;
+        i32 outer_type = std::tls::receive_record(
+            connection, record_header, record);
+        if (outer_type != 22) {
+            this.error = "expected ServerHello";
+            connection.close();
+            return false;
+        }
+        u8* server_public_key = malloc(32);
+        if (!std::tls::parse_server_hello(
+            record, session_id, server_public_key)) {
+            this.error = "unsupported or malformed ServerHello";
+            connection.close();
+            return false;
+        }
+
+        std::bytes transcript;
+        transcript.append_bytes(client_hello.data, client_hello.length);
+        transcript.append_bytes(record.data, record.length);
+        u8* shared_secret = malloc(32);
+        std::crypto::x25519(private_key, server_public_key, shared_secret);
+        u64 nonzero = 0;
+        u64 index = 0;
+        while (index < 32) {
+            nonzero = nonzero | u64(shared_secret[index]);
+            index = index + 1;
+        }
+        if (nonzero == 0) {
+            this.error = "invalid X25519 shared secret";
+            connection.close();
+            return false;
+        }
+
+        u8* zeros = malloc(32);
+        u8* empty_hash = malloc(32);
+        u8* early_secret = malloc(32);
+        u8* derived_secret = malloc(32);
+        u8* handshake_secret = malloc(32);
+        u8* transcript_hash = malloc(32);
+        u8* client_handshake_traffic = malloc(32);
+        u8* server_handshake_traffic = malloc(32);
+        std::crypto::sha256(zeros, 0, empty_hash);
+        std::crypto::hkdf_extract(zeros, 32, zeros, 32, early_secret);
+        std::crypto::hkdf_expand_label(
+            early_secret, "derived", empty_hash, 32, derived_secret, 32);
+        std::crypto::hkdf_extract(
+            derived_secret, 32, shared_secret, 32, handshake_secret);
+        std::crypto::sha256(transcript.data, transcript.length, transcript_hash);
+        std::crypto::hkdf_expand_label(
+            handshake_secret, "c hs traffic", transcript_hash, 32,
+            client_handshake_traffic, 32);
+        std::crypto::hkdf_expand_label(
+            handshake_secret, "s hs traffic", transcript_hash, 32,
+            server_handshake_traffic, 32);
+        u8* client_handshake_key = malloc(32);
+        u8* client_handshake_iv = malloc(12);
+        u8* server_handshake_key = malloc(32);
+        u8* server_handshake_iv = malloc(12);
+        std::tls::derive_key_iv(
+            client_handshake_traffic, client_handshake_key,
+            client_handshake_iv);
+        std::tls::derive_key_iv(
+            server_handshake_traffic, server_handshake_key,
+            server_handshake_iv);
+
+        std::bytes decrypted;
+        std::bytes pending;
+        u64 pending_cursor = 0;
+        u64 server_sequence = 0;
+        u64 stage = 0;
+        bool handshake_failed = false;
+        bool parse_more = false;
+        u8 message_type = u8(0);
+        u64 message_length = 0;
+        u64 message_total = 0;
+        i32 inner_type = 0;
+        while (stage < 4) {
+            outer_type = std::tls::receive_record(
+                connection, record_header, record);
+            if (outer_type == 20) {
+                if (record.length != 1) {
+                    handshake_failed = true;
+                } else {
+                    if (record.data[0] != u8(1)) {
+                        handshake_failed = true;
+                    }
+                }
+            } else {
+                if (outer_type != 23) {
+                    handshake_failed = true;
+                } else {
+                    inner_type = std::tls::decrypt_record(
+                        record_header, record, server_handshake_key,
+                        server_handshake_iv, server_sequence, decrypted);
+                    server_sequence = server_sequence + 1;
+                    if (inner_type != 22) {
+                        handshake_failed = true;
+                    } else {
+                        pending.append_bytes(decrypted.data, decrypted.length);
+                    }
+                }
+            }
+            if (handshake_failed) {
+                this.error = "TLS handshake record authentication failed";
+                connection.close();
+                return false;
+            }
+
+            parse_more = true;
+            while (parse_more) {
+                parse_more = false;
+                if (pending_cursor + 4 <= pending.length) {
+                    message_type = pending.data[pending_cursor];
+                    message_length =
+                        (u64(pending.data[pending_cursor + 1]) << 16) |
+                        (u64(pending.data[pending_cursor + 2]) << 8) |
+                        u64(pending.data[pending_cursor + 3]);
+                    message_total = message_length + 4;
+                    if (pending_cursor + message_total <= pending.length) {
+                        if (stage == 0) {
+                            if (message_type != u8(8)) {
+                                handshake_failed = true;
+                            } else {
+                                transcript.append_bytes(
+                                    pending.data + pending_cursor,
+                                    message_total);
+                            }
+                        }
+                        if (stage == 1) {
+                            if (message_type != u8(11)) {
+                                handshake_failed = true;
+                            } else {
+                                if (!std::tls::verify_leaf_certificate(
+                                    pending.data + pending_cursor,
+                                    message_total,
+                                    this.certificate_sha256)) {
+                                    handshake_failed = true;
+                                } else {
+                                    transcript.append_bytes(
+                                        pending.data + pending_cursor,
+                                        message_total);
+                                }
+                            }
+                        }
+                        if (stage == 2) {
+                            if (!std::tls::verify_certificate_signature(
+                                transcript, pending.data + pending_cursor,
+                                message_total, this.rsa_modulus,
+                                this.rsa_modulus_length,
+                                this.ecdsa_public_key,
+                                this.ecdsa_public_key_length)) {
+                                handshake_failed = true;
+                            } else {
+                                transcript.append_bytes(
+                                    pending.data + pending_cursor,
+                                    message_total);
+                            }
+                        }
+                        if (stage == 3) {
+                            if (!std::tls::verify_finished(
+                                transcript, pending.data + pending_cursor,
+                                message_total, server_handshake_traffic)) {
+                                handshake_failed = true;
+                            } else {
+                                transcript.append_bytes(
+                                    pending.data + pending_cursor,
+                                    message_total);
+                            }
+                        }
+                        if (!handshake_failed) {
+                            stage = stage + 1;
+                            pending_cursor = pending_cursor + message_total;
+                            parse_more = true;
+                        }
+                    }
+                }
+                if (handshake_failed) {
+                    parse_more = false;
+                }
+            }
+            if (handshake_failed) {
+                if (stage == 0) {
+                    this.error = "expected EncryptedExtensions";
+                }
+                if (stage == 1) {
+                    this.error = "leaf certificate pin validation failed";
+                }
+                if (stage == 2) {
+                    this.error = "CertificateVerify signature failed";
+                }
+                if (stage == 3) {
+                    this.error = "server Finished verification failed";
+                }
+                connection.close();
+                return false;
+            }
+        }
+
+        std::crypto::hkdf_expand_label(
+            handshake_secret, "derived", empty_hash, 32, derived_secret, 32);
+        u8* master_secret = malloc(32);
+        std::crypto::hkdf_extract(
+            derived_secret, 32, zeros, 32, master_secret);
+        std::crypto::sha256(transcript.data, transcript.length, transcript_hash);
+        u8* client_application_traffic = malloc(32);
+        u8* server_application_traffic = malloc(32);
+        std::crypto::hkdf_expand_label(
+            master_secret, "c ap traffic", transcript_hash, 32,
+            client_application_traffic, 32);
+        std::crypto::hkdf_expand_label(
+            master_secret, "s ap traffic", transcript_hash, 32,
+            server_application_traffic, 32);
+
+        u8* client_finished_key = malloc(32);
+        u8* client_verify_data = malloc(32);
+        std::crypto::hkdf_expand_label(
+            client_handshake_traffic, "finished", transcript_hash, 0,
+            client_finished_key, 32);
+        std::crypto::hmac_sha256(
+            client_finished_key, 32, transcript_hash, 32,
+            client_verify_data);
+        std::bytes client_finished;
+        client_finished.append(u8(20));
+        client_finished.append_u24(u32(32));
+        client_finished.append_bytes(client_verify_data, 32);
+        if (!std::tls::send_encrypted(
+            connection, client_handshake_key, client_handshake_iv, 0,
+            u8(22), client_finished.data, client_finished.length)) {
+            this.error = "client Finished send failed";
+            connection.close();
+            return false;
+        }
+
+        u8* client_application_key = malloc(32);
+        u8* client_application_iv = malloc(12);
+        u8* server_application_key = malloc(32);
+        u8* server_application_iv = malloc(12);
+        std::tls::derive_key_iv(
+            client_application_traffic, client_application_key,
+            client_application_iv);
+        std::tls::derive_key_iv(
+            server_application_traffic, server_application_key,
+            server_application_iv);
+        std::bytes request;
+        request.append_text("GET ");
+        request.append_text(this.path);
+        request.append_text(" HTTP/1.1\r\nHost: ");
+        request.append_text(this.host);
+        request.append_text(
+            "\r\nConnection: close\r\nUser-Agent: concept/0.1\r\nAccept: */*\r\n\r\n");
+        if (!std::tls::send_encrypted(
+            connection, client_application_key, client_application_iv, 0,
+            u8(23), request.data, request.length)) {
+            this.error = "encrypted HTTP request send failed";
+            connection.close();
+            return false;
+        }
+
+        std::bytes response_bytes;
+        u8* close_alert = malloc(2);
+        close_alert[0] = u8(1);
+        close_alert[1] = u8(0);
+        server_sequence = 0;
+        bool receiving = true;
+        bool response_failed = false;
+        bool clean_shutdown = false;
+        while (receiving) {
+            outer_type = std::tls::receive_record(
+                connection, record_header, record);
+            if (outer_type == -1) {
+                receiving = false;
+            } else {
+                if (outer_type != 23) {
+                    response_failed = true;
+                    receiving = false;
+                } else {
+                    inner_type = std::tls::decrypt_record(
+                        record_header, record, server_application_key,
+                        server_application_iv, server_sequence, decrypted);
+                    server_sequence = server_sequence + 1;
+                    if (inner_type == 23) {
+                        response_bytes.append_bytes(
+                            decrypted.data, decrypted.length);
+                    } else {
+                        if (inner_type == 21) {
+                            if (decrypted.length != 2) {
+                                response_failed = true;
+                            } else {
+                                if (decrypted.data[1] != u8(0)) {
+                                    response_failed = true;
+                                } else {
+                                    std::tls::send_encrypted(
+                                        connection, client_application_key,
+                                        client_application_iv, 1, u8(21),
+                                        close_alert, 2);
+                                    clean_shutdown = true;
+                                }
+                            }
+                            receiving = false;
+                        } else {
+                            if (inner_type != 22) {
+                                response_failed = true;
+                                receiving = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        connection.close();
+        free(close_alert);
+        if (response_failed) {
+            this.error = "encrypted response authentication failed";
+            return false;
+        }
+        if (!clean_shutdown) {
+            this.error = "TLS close_notify was not received";
+            return false;
+        }
+        if (response_bytes.length == 0) {
+            this.error = "server returned no HTTP response";
+            return false;
+        }
+        this.response = response_bytes.to_string();
+        response_bytes.destroy();
+        request.destroy();
+        client_finished.destroy();
+        pending.destroy();
+        decrypted.destroy();
+        transcript.destroy();
+        record.destroy();
+        client_hello.destroy();
+        free(server_application_iv);
+        free(server_application_key);
+        free(client_application_iv);
+        free(client_application_key);
+        free(client_verify_data);
+        free(client_finished_key);
+        free(server_application_traffic);
+        free(client_application_traffic);
+        free(master_secret);
+        free(server_handshake_iv);
+        free(server_handshake_key);
+        free(client_handshake_iv);
+        free(client_handshake_key);
+        free(server_handshake_traffic);
+        free(client_handshake_traffic);
+        free(transcript_hash);
+        free(handshake_secret);
+        free(derived_secret);
+        free(early_secret);
+        free(empty_hash);
+        free(zeros);
+        free(shared_secret);
+        free(server_public_key);
+        free(record_header);
+        free(client_public_key);
+        free(basepoint);
+        free(private_key);
+        free(session_id);
+        free(client_random);
+        return true;
+    }
+}

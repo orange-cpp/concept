@@ -1,0 +1,282 @@
+import std::crypto;
+
+fn matches(u8* actual, u8* expected, u64 count) -> bool {
+    u64 index = 0;
+    u64 differences = 0;
+    while (index < count) {
+        differences = differences | u64(actual[index] ^ expected[index]);
+        index = index + 1;
+    }
+    return differences == 0;
+}
+
+fn main() -> int {
+    std::bytes message;
+    message.append_text("abc");
+    u8* digest = malloc(32);
+    std::crypto::sha256(message.data, message.length, digest);
+    u8* expected_sha = malloc(32);
+    expected_sha[0] = u8(0xba); expected_sha[1] = u8(0x78);
+    expected_sha[2] = u8(0x16); expected_sha[3] = u8(0xbf);
+    expected_sha[4] = u8(0x8f); expected_sha[5] = u8(0x01);
+    expected_sha[6] = u8(0xcf); expected_sha[7] = u8(0xea);
+    expected_sha[8] = u8(0x41); expected_sha[9] = u8(0x41);
+    expected_sha[10] = u8(0x40); expected_sha[11] = u8(0xde);
+    expected_sha[12] = u8(0x5d); expected_sha[13] = u8(0xae);
+    expected_sha[14] = u8(0x22); expected_sha[15] = u8(0x23);
+    expected_sha[16] = u8(0xb0); expected_sha[17] = u8(0x03);
+    expected_sha[18] = u8(0x61); expected_sha[19] = u8(0xa3);
+    expected_sha[20] = u8(0x96); expected_sha[21] = u8(0x17);
+    expected_sha[22] = u8(0x7a); expected_sha[23] = u8(0x9c);
+    expected_sha[24] = u8(0xb4); expected_sha[25] = u8(0x10);
+    expected_sha[26] = u8(0xff); expected_sha[27] = u8(0x61);
+    expected_sha[28] = u8(0xf2); expected_sha[29] = u8(0x00);
+    expected_sha[30] = u8(0x15); expected_sha[31] = u8(0xad);
+    if (!matches(digest, expected_sha, 32)) { return 1; }
+
+    u8* hmac_key = malloc(20);
+    u64 index = 0;
+    while (index < 20) {
+        hmac_key[index] = u8(0x0b);
+        index = index + 1;
+    }
+    std::bytes hmac_data;
+    hmac_data.append_text("Hi There");
+    std::crypto::hmac_sha256(
+        hmac_key, 20, hmac_data.data, hmac_data.length, digest);
+    u8* expected_hmac = malloc(32);
+    expected_hmac[0] = u8(0xb0); expected_hmac[1] = u8(0x34);
+    expected_hmac[2] = u8(0x4c); expected_hmac[3] = u8(0x61);
+    expected_hmac[4] = u8(0xd8); expected_hmac[5] = u8(0xdb);
+    expected_hmac[6] = u8(0x38); expected_hmac[7] = u8(0x53);
+    expected_hmac[8] = u8(0x5c); expected_hmac[9] = u8(0xa8);
+    expected_hmac[10] = u8(0xaf); expected_hmac[11] = u8(0xce);
+    expected_hmac[12] = u8(0xaf); expected_hmac[13] = u8(0x0b);
+    expected_hmac[14] = u8(0xf1); expected_hmac[15] = u8(0x2b);
+    expected_hmac[16] = u8(0x88); expected_hmac[17] = u8(0x1d);
+    expected_hmac[18] = u8(0xc2); expected_hmac[19] = u8(0x00);
+    expected_hmac[20] = u8(0xc9); expected_hmac[21] = u8(0x83);
+    expected_hmac[22] = u8(0x3d); expected_hmac[23] = u8(0xa7);
+    expected_hmac[24] = u8(0x26); expected_hmac[25] = u8(0xe9);
+    expected_hmac[26] = u8(0x37); expected_hmac[27] = u8(0x6c);
+    expected_hmac[28] = u8(0x2e); expected_hmac[29] = u8(0x32);
+    expected_hmac[30] = u8(0xcf); expected_hmac[31] = u8(0xf7);
+    if (!matches(digest, expected_hmac, 32)) { return 2; }
+
+    u8* ikm = malloc(22);
+    index = 0;
+    while (index < 22) {
+        ikm[index] = u8(0x0b);
+        index = index + 1;
+    }
+    u8* salt = malloc(13);
+    index = 0;
+    while (index < 13) {
+        salt[index] = u8(index);
+        index = index + 1;
+    }
+    u8* info = malloc(10);
+    index = 0;
+    while (index < 10) {
+        info[index] = u8(0xf0 + index);
+        index = index + 1;
+    }
+    u8* prk = malloc(32);
+    std::crypto::hkdf_extract(salt, 13, ikm, 22, prk);
+    u8* expected_prk = malloc(32);
+    expected_prk[0] = u8(0x07); expected_prk[1] = u8(0x77);
+    expected_prk[2] = u8(0x09); expected_prk[3] = u8(0x36);
+    expected_prk[4] = u8(0x2c); expected_prk[5] = u8(0x2e);
+    expected_prk[6] = u8(0x32); expected_prk[7] = u8(0xdf);
+    expected_prk[8] = u8(0x0d); expected_prk[9] = u8(0xdc);
+    expected_prk[10] = u8(0x3f); expected_prk[11] = u8(0x0d);
+    expected_prk[12] = u8(0xc4); expected_prk[13] = u8(0x7b);
+    expected_prk[14] = u8(0xba); expected_prk[15] = u8(0x63);
+    expected_prk[16] = u8(0x90); expected_prk[17] = u8(0xb6);
+    expected_prk[18] = u8(0xc7); expected_prk[19] = u8(0x3b);
+    expected_prk[20] = u8(0xb5); expected_prk[21] = u8(0x0f);
+    expected_prk[22] = u8(0x9c); expected_prk[23] = u8(0x31);
+    expected_prk[24] = u8(0x22); expected_prk[25] = u8(0xec);
+    expected_prk[26] = u8(0x84); expected_prk[27] = u8(0x4a);
+    expected_prk[28] = u8(0xd7); expected_prk[29] = u8(0xc2);
+    expected_prk[30] = u8(0xb3); expected_prk[31] = u8(0xe5);
+    if (!matches(prk, expected_prk, 32)) { return 3; }
+
+    u8* output = malloc(42);
+    std::crypto::hkdf_expand(prk, info, 10, output, 42);
+    u8* expected_output = malloc(42);
+    expected_output[0] = u8(0x3c); expected_output[1] = u8(0xb2);
+    expected_output[2] = u8(0x5f); expected_output[3] = u8(0x25);
+    expected_output[4] = u8(0xfa); expected_output[5] = u8(0xac);
+    expected_output[6] = u8(0xd5); expected_output[7] = u8(0x7a);
+    expected_output[8] = u8(0x90); expected_output[9] = u8(0x43);
+    expected_output[10] = u8(0x4f); expected_output[11] = u8(0x64);
+    expected_output[12] = u8(0xd0); expected_output[13] = u8(0x36);
+    expected_output[14] = u8(0x2f); expected_output[15] = u8(0x2a);
+    expected_output[16] = u8(0x2d); expected_output[17] = u8(0x2d);
+    expected_output[18] = u8(0x0a); expected_output[19] = u8(0x90);
+    expected_output[20] = u8(0xcf); expected_output[21] = u8(0x1a);
+    expected_output[22] = u8(0x5a); expected_output[23] = u8(0x4c);
+    expected_output[24] = u8(0x5d); expected_output[25] = u8(0xb0);
+    expected_output[26] = u8(0x2d); expected_output[27] = u8(0x56);
+    expected_output[28] = u8(0xec); expected_output[29] = u8(0xc4);
+    expected_output[30] = u8(0xc5); expected_output[31] = u8(0xbf);
+    expected_output[32] = u8(0x34); expected_output[33] = u8(0x00);
+    expected_output[34] = u8(0x72); expected_output[35] = u8(0x08);
+    expected_output[36] = u8(0xd5); expected_output[37] = u8(0xb8);
+    expected_output[38] = u8(0x87); expected_output[39] = u8(0x18);
+    expected_output[40] = u8(0x58); expected_output[41] = u8(0x65);
+    if (!matches(output, expected_output, 42)) { return 4; }
+
+    u8* chacha_key = malloc(32);
+    index = 0;
+    while (index < 32) {
+        chacha_key[index] = u8(index);
+        index = index + 1;
+    }
+    u8* nonce = malloc(12);
+    nonce[3] = u8(9);
+    nonce[7] = u8(0x4a);
+    u8* chacha_block = malloc(64);
+    std::crypto::chacha20_block(
+        chacha_key, u32(1), nonce, chacha_block);
+    u8* expected_chacha = malloc(64);
+    expected_chacha[0] = u8(0x10); expected_chacha[1] = u8(0xf1);
+    expected_chacha[2] = u8(0xe7); expected_chacha[3] = u8(0xe4);
+    expected_chacha[4] = u8(0xd1); expected_chacha[5] = u8(0x3b);
+    expected_chacha[6] = u8(0x59); expected_chacha[7] = u8(0x15);
+    expected_chacha[8] = u8(0x50); expected_chacha[9] = u8(0x0f);
+    expected_chacha[10] = u8(0xdd); expected_chacha[11] = u8(0x1f);
+    expected_chacha[12] = u8(0xa3); expected_chacha[13] = u8(0x20);
+    expected_chacha[14] = u8(0x71); expected_chacha[15] = u8(0xc4);
+    expected_chacha[16] = u8(0xc7); expected_chacha[17] = u8(0xd1);
+    expected_chacha[18] = u8(0xf4); expected_chacha[19] = u8(0xc7);
+    expected_chacha[20] = u8(0x33); expected_chacha[21] = u8(0xc0);
+    expected_chacha[22] = u8(0x68); expected_chacha[23] = u8(0x03);
+    expected_chacha[24] = u8(0x04); expected_chacha[25] = u8(0x22);
+    expected_chacha[26] = u8(0xaa); expected_chacha[27] = u8(0x9a);
+    expected_chacha[28] = u8(0xc3); expected_chacha[29] = u8(0xd4);
+    expected_chacha[30] = u8(0x6c); expected_chacha[31] = u8(0x4e);
+    expected_chacha[32] = u8(0xd2); expected_chacha[33] = u8(0x82);
+    expected_chacha[34] = u8(0x64); expected_chacha[35] = u8(0x46);
+    expected_chacha[36] = u8(0x07); expected_chacha[37] = u8(0x9f);
+    expected_chacha[38] = u8(0xaa); expected_chacha[39] = u8(0x09);
+    expected_chacha[40] = u8(0x14); expected_chacha[41] = u8(0xc2);
+    expected_chacha[42] = u8(0xd7); expected_chacha[43] = u8(0x05);
+    expected_chacha[44] = u8(0xd9); expected_chacha[45] = u8(0x8b);
+    expected_chacha[46] = u8(0x02); expected_chacha[47] = u8(0xa2);
+    expected_chacha[48] = u8(0xb5); expected_chacha[49] = u8(0x12);
+    expected_chacha[50] = u8(0x9c); expected_chacha[51] = u8(0xd1);
+    expected_chacha[52] = u8(0xde); expected_chacha[53] = u8(0x16);
+    expected_chacha[54] = u8(0x4e); expected_chacha[55] = u8(0xb9);
+    expected_chacha[56] = u8(0xcb); expected_chacha[57] = u8(0xd0);
+    expected_chacha[58] = u8(0x83); expected_chacha[59] = u8(0xe8);
+    expected_chacha[60] = u8(0xa2); expected_chacha[61] = u8(0x50);
+    expected_chacha[62] = u8(0x3c); expected_chacha[63] = u8(0x4e);
+    if (!matches(chacha_block, expected_chacha, 64)) { return 5; }
+
+    u8* poly_key = malloc(32);
+    poly_key[0] = u8(0x85); poly_key[1] = u8(0xd6);
+    poly_key[2] = u8(0xbe); poly_key[3] = u8(0x78);
+    poly_key[4] = u8(0x57); poly_key[5] = u8(0x55);
+    poly_key[6] = u8(0x6d); poly_key[7] = u8(0x33);
+    poly_key[8] = u8(0x7f); poly_key[9] = u8(0x44);
+    poly_key[10] = u8(0x52); poly_key[11] = u8(0xfe);
+    poly_key[12] = u8(0x42); poly_key[13] = u8(0xd5);
+    poly_key[14] = u8(0x06); poly_key[15] = u8(0xa8);
+    poly_key[16] = u8(0x01); poly_key[17] = u8(0x03);
+    poly_key[18] = u8(0x80); poly_key[19] = u8(0x8a);
+    poly_key[20] = u8(0xfb); poly_key[21] = u8(0x0d);
+    poly_key[22] = u8(0xb2); poly_key[23] = u8(0xfd);
+    poly_key[24] = u8(0x4a); poly_key[25] = u8(0xbf);
+    poly_key[26] = u8(0xf6); poly_key[27] = u8(0xaf);
+    poly_key[28] = u8(0x41); poly_key[29] = u8(0x49);
+    poly_key[30] = u8(0xf5); poly_key[31] = u8(0x1b);
+    std::bytes poly_message;
+    poly_message.append_text("Cryptographic Forum Research Group");
+    u8* poly_tag = malloc(16);
+    std::crypto::poly1305(
+        poly_key, poly_message.data, poly_message.length, poly_tag);
+    u8* expected_tag = malloc(16);
+    expected_tag[0] = u8(0xa8); expected_tag[1] = u8(0x06);
+    expected_tag[2] = u8(0x1d); expected_tag[3] = u8(0xc1);
+    expected_tag[4] = u8(0x30); expected_tag[5] = u8(0x51);
+    expected_tag[6] = u8(0x36); expected_tag[7] = u8(0xc6);
+    expected_tag[8] = u8(0xc2); expected_tag[9] = u8(0x2b);
+    expected_tag[10] = u8(0x8b); expected_tag[11] = u8(0xaf);
+    expected_tag[12] = u8(0x0c); expected_tag[13] = u8(0x01);
+    expected_tag[14] = u8(0x27); expected_tag[15] = u8(0xa9);
+    if (!matches(poly_tag, expected_tag, 16)) { return 6; }
+
+    std::bytes aad;
+    aad.append_text("associated data");
+    std::bytes plaintext;
+    plaintext.append_text("Concept-only authenticated encryption");
+    u8* ciphertext = malloc(plaintext.length);
+    u8* aead_tag = malloc(16);
+    std::crypto::aead_chacha20_poly1305_encrypt(
+        chacha_key, nonce, aad.data, aad.length,
+        plaintext.data, plaintext.length, ciphertext, aead_tag);
+    u8* decrypted = malloc(plaintext.length);
+    if (!std::crypto::aead_chacha20_poly1305_decrypt(
+        chacha_key, nonce, aad.data, aad.length,
+        ciphertext, plaintext.length, aead_tag, decrypted)) { return 7; }
+    if (!matches(decrypted, plaintext.data, plaintext.length)) { return 8; }
+    aead_tag[0] = aead_tag[0] ^ u8(1);
+    if (std::crypto::aead_chacha20_poly1305_decrypt(
+        chacha_key, nonce, aad.data, aad.length,
+        ciphertext, plaintext.length, aead_tag, decrypted)) { return 9; }
+
+    u8* scalar = malloc(32);
+    scalar[0] = u8(0x77); scalar[1] = u8(0x07);
+    scalar[2] = u8(0x6d); scalar[3] = u8(0x0a);
+    scalar[4] = u8(0x73); scalar[5] = u8(0x18);
+    scalar[6] = u8(0xa5); scalar[7] = u8(0x7d);
+    scalar[8] = u8(0x3c); scalar[9] = u8(0x16);
+    scalar[10] = u8(0xc1); scalar[11] = u8(0x72);
+    scalar[12] = u8(0x51); scalar[13] = u8(0xb2);
+    scalar[14] = u8(0x66); scalar[15] = u8(0x45);
+    scalar[16] = u8(0xdf); scalar[17] = u8(0x4c);
+    scalar[18] = u8(0x2f); scalar[19] = u8(0x87);
+    scalar[20] = u8(0xeb); scalar[21] = u8(0xc0);
+    scalar[22] = u8(0x99); scalar[23] = u8(0x2a);
+    scalar[24] = u8(0xb1); scalar[25] = u8(0x77);
+    scalar[26] = u8(0xfb); scalar[27] = u8(0xa5);
+    scalar[28] = u8(0x1d); scalar[29] = u8(0xb9);
+    scalar[30] = u8(0x2c); scalar[31] = u8(0x2a);
+    u8* basepoint = malloc(32);
+    basepoint[0] = u8(9);
+    u8* public_key = malloc(32);
+    std::crypto::x25519(scalar, basepoint, public_key);
+    u8* expected_public = malloc(32);
+    expected_public[0] = u8(0x85); expected_public[1] = u8(0x20);
+    expected_public[2] = u8(0xf0); expected_public[3] = u8(0x09);
+    expected_public[4] = u8(0x89); expected_public[5] = u8(0x30);
+    expected_public[6] = u8(0xa7); expected_public[7] = u8(0x54);
+    expected_public[8] = u8(0x74); expected_public[9] = u8(0x8b);
+    expected_public[10] = u8(0x7d); expected_public[11] = u8(0xdc);
+    expected_public[12] = u8(0xb4); expected_public[13] = u8(0x3e);
+    expected_public[14] = u8(0xf7); expected_public[15] = u8(0x5a);
+    expected_public[16] = u8(0x0d); expected_public[17] = u8(0xbf);
+    expected_public[18] = u8(0x3a); expected_public[19] = u8(0x0d);
+    expected_public[20] = u8(0x26); expected_public[21] = u8(0x38);
+    expected_public[22] = u8(0x1a); expected_public[23] = u8(0xf4);
+    expected_public[24] = u8(0xeb); expected_public[25] = u8(0xa4);
+    expected_public[26] = u8(0xa9); expected_public[27] = u8(0x8e);
+    expected_public[28] = u8(0xaa); expected_public[29] = u8(0x9b);
+    expected_public[30] = u8(0x4e); expected_public[31] = u8(0x6a);
+    if (!matches(public_key, expected_public, 32)) { return 10; }
+
+    free(expected_public); free(public_key); free(basepoint); free(scalar);
+
+    free(decrypted); free(aead_tag); free(ciphertext);
+    plaintext.destroy(); aad.destroy();
+    free(expected_tag); free(poly_tag); poly_message.destroy(); free(poly_key);
+    free(expected_chacha); free(chacha_block); free(nonce); free(chacha_key);
+
+    free(expected_output); free(output); free(expected_prk); free(prk);
+    free(info); free(salt); free(ikm); free(expected_hmac); free(hmac_key);
+    free(expected_sha); free(digest);
+    hmac_data.destroy(); message.destroy();
+    return 42;
+}

@@ -98,6 +98,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_executable(concept-tests tests/tests.cpp)
     target_link_libraries(concept-tests PRIVATE concept_frontend)
     if(MSVC)
@@ -180,6 +181,47 @@ if(BUILD_TESTING)
             -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/dynamic-array.concept
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-dynamic-array-smoke.exe
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-crypto
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/crypto-self-test.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-crypto-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-rsa
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/rsa-self-test.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-rsa-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-ecdsa
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/ecdsa-self-test.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-ecdsa-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-https
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_https_test.py
+            $<TARGET_FILE:concept>
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/https.concept
+            ${CMAKE_CURRENT_BINARY_DIR}/concept-https-smoke.exe
+    )
+    add_test(
+        NAME concept-packaged-https-ecdsa
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_https_test.py
+            $<TARGET_FILE:concept>
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/https-ecdsa.concept
+            ${CMAKE_CURRENT_BINARY_DIR}/concept-https-ecdsa-smoke.exe
+            ecdsa
     )
     add_test(
         NAME concept-packaged-arguments

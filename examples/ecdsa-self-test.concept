@@ -1,0 +1,49 @@
+import std::ecdsa;
+
+fn hex_digit(u8 value) -> u8 {
+    if (value >= u8(48)) {
+        if (value <= u8(57)) {
+            return value - u8(48);
+        }
+    }
+    return value - u8(87);
+}
+
+fn decode_hex(string value, u8* output) -> bool {
+    u64 count = string_length(value) / 2;
+    u64 index = 0;
+    while (index < count) {
+        output[index] = (hex_digit(string_byte(value, index * 2)) << 4) |
+            hex_digit(string_byte(value, index * 2 + 1));
+        index = index + 1;
+    }
+    return true;
+}
+
+fn main() -> int {
+    u8* public_key = malloc(65);
+    u8* signature = malloc(71);
+    u8* message_hash = malloc(32);
+    decode_hex(
+        "04265704efe2cb62e99c1ac1aba2e9e2a5c8accdc4af4d93aedc87f08394dfb016181e3d0185448be0866b572d061544b2cc853ac0eae64b178414b6a81017fb1c",
+        public_key);
+    decode_hex(
+        "3045022034f86cc664d2d691b975b34a07a90382df3114f735f3ec9b78f7516edc6598d6022100f3f70b76dac61994524468386314b0b884fd4bcd809d441a3cd6653297262f95",
+        signature);
+    decode_hex(
+        "432a30e10f93275b526fb1b8e71ac814a41efc02afd4003b7e3a354ee5a93de4",
+        message_hash);
+    if (!std::ecdsa::verify_p256_sha256(
+        public_key, 65, signature, 71, message_hash)) {
+        return 1;
+    }
+    signature[70] = signature[70] ^ u8(1);
+    if (std::ecdsa::verify_p256_sha256(
+        public_key, 65, signature, 71, message_hash)) {
+        return 2;
+    }
+    free(message_hash);
+    free(signature);
+    free(public_key);
+    return 42;
+}
