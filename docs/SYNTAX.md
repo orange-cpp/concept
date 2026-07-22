@@ -459,18 +459,21 @@ fn protected_calculation() -> i32 {
 ```
 
 `level` is a decimal integer from `0` through `100`. Level `0` emits straight
-bytecode. Higher values add progressively more opaque predicates, junk work,
-and control-flow jumps. The legacy spelling `@complexty(level)` is accepted.
-Only one complexity decorator may be attached to a function.
+bytecode and selects optimized VM handlers with no per-instruction mutation
+work. Higher values enable mutated handler shapes and add progressively more
+opaque predicates, junk work, and control-flow jumps. The legacy spelling
+`@complexty(level)` is accepted. Only one complexity decorator may be attached
+to a function.
 
 This decorator raises reverse-engineering cost but is not a security boundary.
 Every compilation also independently randomizes opcode numbers for each VM
-context. Each VM seed selects one of four equivalent native handler shapes per
-opcode. These shapes may reorder safe operand work, substitute modular integer
-operations or mirrored comparisons, and perform side-effect-free junk
-calculations. Handler selection changes across compilations automatically and
-does not require a decorator. The runtime contains every precompiled shape, so
-this is execution-path obfuscation rather than native machine-code mutation.
+context. For a function whose level is above `0`, each VM seed selects one of
+four equivalent native handler shapes per opcode. These shapes may reorder safe
+operand work, substitute modular integer operations or mirrored comparisons,
+and perform side-effect-free junk calculations. The runtime contains every
+precompiled shape, so this is execution-path obfuscation rather than native
+machine-code mutation. Complexity `0` bypasses handler selection and junk
+calculations while retaining randomized opcode numbers and encoded storage.
 
 Serialized bytecode also encodes every opcode and operand with per-VM rolling
 keys. Each VM seed independently chooses whether its physical region is stored
@@ -631,8 +634,11 @@ labels, ChaCha20, Poly1305, ChaCha20-Poly1305, and X25519 in Concept source.
 `std::rsa` implements only RSA-PSS/SHA-256 verification for a 2048-bit modulus,
 exponent 65537, and 32-byte salt. `std::ecdsa` implements strict-DER
 ECDSA/SHA-256 verification over NIST P-256, including public-point validation.
-These modules operate on caller-sized `u8*` buffers and are educational code,
-not constant-time or independently audited.
+Its P-256 arithmetic uses nine radix-29 limbs, fixed Montgomery constants, and
+reusable scratch buffers. Core-value indexing is emitted as fused VM
+load/store instructions, avoiding temporary pointer handles in arithmetic
+loops. These modules operate on caller-sized `u8*` buffers and are educational
+code, not constant-time or independently audited.
 
 ## `std::https`
 

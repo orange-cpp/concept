@@ -1980,6 +1980,8 @@ private:
                                       type.class_name,
                                       type.pointer_depth});
         }
+        emit(Op::set_complexity);
+        code_.push_back(current_complexity_);
         if (current_complexity_ != 0) {
             emit_obfuscation_layer();
         }
@@ -2130,6 +2132,18 @@ private:
             SemanticType target_type;
             if (statement.target->kind == Expr::Kind::index) {
                 target_type = semantic_type(*statement.target);
+                if (target_type.pointer_depth == 0 &&
+                    target_type.class_name.empty()) {
+                    static_cast<void>(compile_expression(
+                        *statement.target->left));
+                    compile_expression_as(*statement.target->right,
+                                          ValueType::i64);
+                    compile_expression_as(*statement.expression,
+                                          target_type.type);
+                    emit(Op::store_indexed);
+                    emit_type(target_type.type);
+                    return;
+                }
                 compile_index_address(*statement.target);
             } else {
                 const auto pointer_type =
@@ -2224,6 +2238,13 @@ private:
         }
         case Expr::Kind::index: {
             const auto result = semantic_type(expression);
+            if (result.pointer_depth == 0 && result.class_name.empty()) {
+                static_cast<void>(compile_expression(*expression.left));
+                compile_expression_as(*expression.right, ValueType::i64);
+                emit(Op::load_indexed);
+                emit_type(result.type);
+                return result.type;
+            }
             compile_index_address(expression);
             emit(Op::load_indirect);
             return result.pointer_depth != 0 || !result.class_name.empty()

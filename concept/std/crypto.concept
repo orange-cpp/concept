@@ -735,9 +735,8 @@ fn std::crypto::field_subtract(
     return true;
 }
 
-fn std::crypto::field_multiply(
-    i64* output, i64* left, i64* right) -> bool {
-    i64* product = malloc(256);
+fn std::crypto::field_multiply_scratch(
+    i64* output, i64* left, i64* right, i64* product) -> bool {
     u64 index = 0;
     while (index < 32) {
         product[index] = 0;
@@ -765,12 +764,26 @@ fn std::crypto::field_multiply(
     }
     std::crypto::field_carry(output);
     std::crypto::field_carry(output);
-    free(product);
     return true;
+}
+
+fn std::crypto::field_multiply(
+    i64* output, i64* left, i64* right) -> bool {
+    i64* product = malloc(256);
+    bool result = std::crypto::field_multiply_scratch(
+        output, left, right, product);
+    free(product);
+    return result;
 }
 
 fn std::crypto::field_square(i64* output, i64* input) -> bool {
     return std::crypto::field_multiply(output, input, input);
+}
+
+fn std::crypto::field_square_scratch(
+    i64* output, i64* input, i64* product) -> bool {
+    return std::crypto::field_multiply_scratch(
+        output, input, input, product);
 }
 
 fn std::crypto::field_unpack(i64* output, u8* input) -> bool {
@@ -822,23 +835,33 @@ fn std::crypto::field_pack(u8* output, i64* input) -> bool {
     return true;
 }
 
-fn std::crypto::field_inverse(i64* output, i64* input) -> bool {
+fn std::crypto::field_inverse_scratch(
+    i64* output, i64* input, i64* product) -> bool {
     i64* value = malloc(128);
     std::crypto::field_copy(value, input);
     i64 exponent = 253;
     while (exponent >= 0) {
-        std::crypto::field_square(value, value);
+        std::crypto::field_square_scratch(value, value, product);
         bool multiply = true;
         if (exponent == 2) { multiply = false; }
         if (exponent == 4) { multiply = false; }
         if (multiply) {
-            std::crypto::field_multiply(value, value, input);
+            std::crypto::field_multiply_scratch(
+                value, value, input, product);
         }
         exponent = exponent - 1;
     }
     std::crypto::field_copy(output, value);
     free(value);
     return true;
+}
+
+fn std::crypto::field_inverse(i64* output, i64* input) -> bool {
+    i64* product = malloc(256);
+    bool result = std::crypto::field_inverse_scratch(
+        output, input, product);
+    free(product);
+    return result;
 }
 
 fn std::crypto::x25519(u8* scalar, u8* point, u8* output) -> bool {
@@ -859,6 +882,7 @@ fn std::crypto::x25519(u8* scalar, u8* point, u8* output) -> bool {
     i64* e = malloc(128);
     i64* f = malloc(128);
     i64* constant = malloc(128);
+    i64* product = malloc(256);
     std::crypto::field_unpack(x, point);
     a[0] = 1;
     d[0] = 1;
@@ -879,29 +903,29 @@ fn std::crypto::x25519(u8* scalar, u8* point, u8* output) -> bool {
         std::crypto::field_subtract(a, a, c);
         std::crypto::field_add(c, b, d);
         std::crypto::field_subtract(b, b, d);
-        std::crypto::field_square(d, e);
-        std::crypto::field_square(f, a);
-        std::crypto::field_multiply(a, c, a);
-        std::crypto::field_multiply(c, b, e);
+        std::crypto::field_square_scratch(d, e, product);
+        std::crypto::field_square_scratch(f, a, product);
+        std::crypto::field_multiply_scratch(a, c, a, product);
+        std::crypto::field_multiply_scratch(c, b, e, product);
         std::crypto::field_add(e, a, c);
         std::crypto::field_subtract(a, a, c);
-        std::crypto::field_square(b, a);
+        std::crypto::field_square_scratch(b, a, product);
         std::crypto::field_subtract(c, d, f);
-        std::crypto::field_multiply(a, c, constant);
+        std::crypto::field_multiply_scratch(a, c, constant, product);
         std::crypto::field_add(a, a, d);
-        std::crypto::field_multiply(c, c, a);
-        std::crypto::field_multiply(a, d, f);
-        std::crypto::field_multiply(d, b, x);
-        std::crypto::field_square(b, e);
+        std::crypto::field_multiply_scratch(c, c, a, product);
+        std::crypto::field_multiply_scratch(a, d, f, product);
+        std::crypto::field_multiply_scratch(d, b, x, product);
+        std::crypto::field_square_scratch(b, e, product);
         std::crypto::field_select(a, b, swap);
         std::crypto::field_select(c, d, swap);
         bit = bit - 1;
     }
-    std::crypto::field_inverse(c, c);
-    std::crypto::field_multiply(a, a, c);
+    std::crypto::field_inverse_scratch(c, c, product);
+    std::crypto::field_multiply_scratch(a, a, c, product);
     std::crypto::field_pack(output, a);
 
-    free(constant); free(f); free(e); free(d);
+    free(product); free(constant); free(f); free(e); free(d);
     free(c); free(b); free(a); free(x); free(clamped);
     return true;
 }

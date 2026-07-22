@@ -195,6 +195,7 @@ void bytecode_direction_test() {
 
 void handler_mutation_test() {
     constexpr std::string_view source = R"(
+        @complexity(100)
         fn combine(i64 first, i64 second, i64 adjustment) -> i64 {
             i64 value = first + second;
             value = value - adjustment;
@@ -210,6 +211,7 @@ void handler_mutation_test() {
             return 0;
         }
 
+        @complexity(100)
         fn main() -> i64 {
             string left = "handler";
             string right = "handler";
@@ -272,6 +274,13 @@ void complexity_decorator_test() {
 
     expect(plain.code == zero.code,
            "complexity zero should emit straight bytecode");
+    expect(zero.code[zero.entry] ==
+               static_cast<std::uint8_t>(cpt::Op::set_complexity) &&
+               zero.code[zero.entry + 1] == 0 &&
+               medium.code[medium.entry] ==
+                   static_cast<std::uint8_t>(cpt::Op::set_complexity) &&
+               medium.code[medium.entry + 1] == 25,
+           "function bytecode should carry its runtime complexity level");
     expect(zero.code.size() < medium.code.size() &&
                medium.code.size() < full.code.size(),
            "higher complexity should emit progressively more bytecode");
@@ -536,6 +545,13 @@ void array_heap_test() {
     )";
 
     const auto compiled = cpt::compile(source, "array-heap-test.concept", 8);
+    expect(std::find(compiled.code.begin(), compiled.code.end(),
+                     static_cast<std::uint8_t>(cpt::Op::load_indexed)) !=
+                   compiled.code.end() &&
+               std::find(compiled.code.begin(), compiled.code.end(),
+                         static_cast<std::uint8_t>(
+                             cpt::Op::store_indexed)) != compiled.code.end(),
+           "core array indexing should use fused VM instructions");
     expect(cpt::execute(compiled) == 42,
            "fixed arrays, pointer arrays, malloc, and free should execute");
     expect(cpt::execute(cpt::deserialize(cpt::serialize(compiled))) == 42,

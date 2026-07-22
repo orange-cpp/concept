@@ -18,7 +18,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 19;
+constexpr std::uint32_t bytecode_version = 21;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -108,6 +108,9 @@ std::size_t operand_size(const Op op) {
     case Op::native_pointer:
     case Op::heap_alloc:
     case Op::pointer_offset:
+    case Op::load_indexed:
+    case Op::store_indexed:
+    case Op::set_complexity:
         return 1;
     case Op::array_alloc:
         return 5;
@@ -643,7 +646,8 @@ void validate(const Bytecode& bytecode) {
                 throw std::runtime_error(xorstr_(
                     "void conversion in Concept bytecode"));
             }
-        } else if (size == 1 || op == Op::array_alloc) {
+        } else if ((size == 1 && op != Op::set_complexity) ||
+                   op == Op::array_alloc) {
             const auto type = check_type(offset);
             if (op == Op::native_pointer && type == ValueType::text) {
                 throw std::runtime_error(
@@ -674,6 +678,9 @@ void validate(const Bytecode& bytecode) {
                 throw std::runtime_error(xorstr_(
                     "non-integral bitwise type in Concept bytecode"));
             }
+        } else if (op == Op::set_complexity && bytecode.code[offset] > 100) {
+            throw std::runtime_error(
+                xorstr_("invalid complexity in Concept bytecode"));
         }
 
         if (op == Op::push_text) {

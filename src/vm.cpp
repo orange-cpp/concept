@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -47,6 +48,7 @@ struct Frame {
     std::size_t stack_base{};
     std::vector<std::uint64_t> locals;
     std::uint64_t constructor_result{};
+    std::uint8_t complexity{};
 };
 
 struct PointerTarget {
@@ -62,6 +64,25 @@ struct HeapBlock {
     bool dynamic{};
     bool freed{};
     std::uint64_t frame_id{};
+};
+
+struct HeapPointerKey {
+    std::uint64_t owner{};
+    std::uint64_t index{};
+    ValueType type{ValueType::u64};
+
+    bool operator==(const HeapPointerKey&) const = default;
+};
+
+struct HeapPointerKeyHash {
+    std::size_t operator()(const HeapPointerKey& value) const noexcept {
+        auto mixed = value.owner ^ std::rotl(value.index, 23);
+        mixed ^= (static_cast<std::uint64_t>(value.type) + 1) << 56;
+        mixed ^= mixed >> 30;
+        mixed *= 0xbf58476d1ce4e5b9ULL;
+        mixed ^= mixed >> 27;
+        return static_cast<std::size_t>(mixed);
+    }
 };
 
 std::uint64_t mix_handler_state(std::uint64_t value) noexcept {
@@ -1487,6 +1508,8 @@ std::int64_t execute(const Bytecode& bytecode) {
     std::vector<std::vector<std::uint64_t>> object_heap;
     std::vector<PointerTarget> pointer_heap;
     std::vector<HeapBlock> heap_blocks;
+    std::unordered_map<HeapPointerKey, std::uint64_t, HeapPointerKeyHash>
+        heap_pointer_handles;
     std::uint64_t next_frame_id = 1;
     text_heap.emplace_back();
     frames.push_back(
@@ -1663,8 +1686,62 @@ std::int64_t execute(const Bytecode& bytecode) {
         return static_cast<std::uintptr_t>(target.owner);
     };
 
-    const auto load_pointer = [&](const std::uint64_t handle) {
-        const auto& target = pointer_target(handle);
+    const auto offset_pointer_target = [&](const std::uint64_t handle,
+                                           const std::uint64_t offset_bits,
+                                           const ValueType type) {
+        const auto offset = std::bit_cast<std::int64_t>(offset_bits);
+        auto adjusted = pointer_target(handle);
+        if (adjusted.kind == PointerTarget::Kind::local ||
+            adjusted.kind == PointerTarget::Kind::field) {
+            if (offset != 0) {
+                throw std::runtime_error(xorstr_(
+                    "Concept VM cannot offset a local or field pointer"));
+            }
+            return adjusted;
+        }
+        if (adjusted.native_type != type) {
+            throw std::runtime_error(xorstr_(
+                "Concept VM pointer arithmetic type mismatch"));
+        }
+        const auto element_size = heap_value_size(type);
+        const auto magnitude =
+            offset < 0 ? std::uint64_t{0} -
+                             static_cast<std::uint64_t>(offset)
+                       : static_cast<std::uint64_t>(offset);
+        if (magnitude > std::numeric_limits<std::uint64_t>::max() /
+                            element_size) {
+            throw std::runtime_error(
+                xorstr_("Concept VM pointer offset overflow"));
+        }
+        const auto byte_delta = magnitude * element_size;
+        auto& position = adjusted.kind == PointerTarget::Kind::heap_block
+                             ? adjusted.index
+                             : adjusted.owner;
+        if (offset < 0) {
+            if (byte_delta > position) {
+                throw std::runtime_error(xorstr_(
+                    "Concept VM pointer offset is out of bounds"));
+            }
+            position -= byte_delta;
+        } else {
+            if (byte_delta >
+                std::numeric_limits<std::uint64_t>::max() - position) {
+                throw std::runtime_error(
+                    xorstr_("Concept VM pointer offset overflow"));
+            }
+            position += byte_delta;
+        }
+        if (adjusted.kind == PointerTarget::Kind::heap_block) {
+            auto& block = heap_block(adjusted.owner);
+            if (adjusted.index > block.bytes.size()) {
+                throw std::runtime_error(xorstr_(
+                    "Concept VM pointer offset is out of bounds"));
+            }
+        }
+        return adjusted;
+    };
+
+    const auto load_pointer_target = [&](const PointerTarget& target) {
         if (target.kind == PointerTarget::Kind::local) {
             auto& frame = local_frame(target.owner);
             if (target.index >= frame.locals.size()) {
@@ -1706,9 +1783,12 @@ std::int64_t execute(const Bytecode& bytecode) {
                    : value;
     };
 
-    const auto store_pointer = [&](const std::uint64_t handle,
-                                   const std::uint64_t value) {
-        const auto& target = pointer_target(handle);
+    const auto load_pointer = [&](const std::uint64_t handle) {
+        return load_pointer_target(pointer_target(handle));
+    };
+
+    const auto store_pointer_target = [&](const PointerTarget& target,
+                                          const std::uint64_t value) {
         if (target.kind == PointerTarget::Kind::local) {
             auto& frame = local_frame(target.owner);
             if (target.index >= frame.locals.size()) {
@@ -1751,6 +1831,11 @@ std::int64_t execute(const Bytecode& bytecode) {
         }
     };
 
+    const auto store_pointer = [&](const std::uint64_t handle,
+                                   const std::uint64_t value) {
+        store_pointer_target(pointer_target(handle), value);
+    };
+
     const auto byte_span = [&](const std::uint64_t handle,
                                const std::uint64_t count) {
         if (count == 0) {
@@ -1783,8 +1868,12 @@ std::int64_t execute(const Bytecode& bytecode) {
         const auto instruction_offset = ip;
         const auto local_ip = ip - vm.begin;
         const auto op = static_cast<Op>(vm.owned_code[local_ip]);
-        const auto variant = handler_variant(vm.opcode_seed, op);
-        execute_handler_junk(vm.opcode_seed, op, instruction_offset, variant);
+        std::uint8_t variant = 0;
+        if (frames.back().complexity != 0) {
+            variant = handler_variant(vm.opcode_seed, op);
+            execute_handler_junk(
+                vm.opcode_seed, op, instruction_offset, variant);
+        }
         const bool reordered = (variant & 1) != 0;
         const bool substituted = (variant & 2) != 0;
         ++ip;
@@ -1908,7 +1997,10 @@ std::int64_t execute(const Bytecode& bytecode) {
                  false, false, frames.back().id});
             pointer_heap.push_back({PointerTarget::Kind::heap_block,
                                     heap_blocks.size(), 0, type});
-            stack.push_back(pointer_heap.size());
+            const auto handle = pointer_heap.size();
+            heap_pointer_handles.emplace(
+                HeapPointerKey{heap_blocks.size(), 0, type}, handle);
+            stack.push_back(handle);
             break;
         }
         case Op::heap_alloc: {
@@ -1924,7 +2016,10 @@ std::int64_t execute(const Bytecode& bytecode) {
                  true, false, 0});
             pointer_heap.push_back({PointerTarget::Kind::heap_block,
                                     heap_blocks.size(), 0, type});
-            stack.push_back(pointer_heap.size());
+            const auto handle = pointer_heap.size();
+            heap_pointer_handles.emplace(
+                HeapPointerKey{heap_blocks.size(), 0, type}, handle);
+            stack.push_back(handle);
             break;
         }
         case Op::heap_free: {
@@ -1961,58 +2056,26 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::pointer_offset: {
             const auto type = read_type(bytecode.code, ip);
             const auto [handle, offset_bits] = pop_binary(reordered);
-            const auto offset = std::bit_cast<std::int64_t>(offset_bits);
-            const auto target = pointer_target(handle);
-            if (target.kind == PointerTarget::Kind::local ||
-                target.kind == PointerTarget::Kind::field) {
-                if (offset != 0) {
-                    throw std::runtime_error(xorstr_(
-                        "Concept VM cannot offset a local or field pointer"));
-                }
+            const auto adjusted =
+                offset_pointer_target(handle, offset_bits, type);
+            if (adjusted.kind == PointerTarget::Kind::local ||
+                adjusted.kind == PointerTarget::Kind::field) {
                 stack.push_back(handle);
                 break;
             }
-            if (target.native_type != type) {
-                throw std::runtime_error(xorstr_(
-                    "Concept VM pointer arithmetic type mismatch"));
-            }
-            const auto element_size = heap_value_size(type);
-            const auto magnitude =
-                offset < 0 ? std::uint64_t{0} -
-                                 static_cast<std::uint64_t>(offset)
-                           : static_cast<std::uint64_t>(offset);
-            if (magnitude > std::numeric_limits<std::uint64_t>::max() /
-                                element_size) {
-                throw std::runtime_error(
-                    xorstr_("Concept VM pointer offset overflow"));
-            }
-            const auto byte_delta = magnitude * element_size;
-            auto adjusted = target;
-            auto& position =
-                adjusted.kind == PointerTarget::Kind::heap_block
-                    ? adjusted.index
-                    : adjusted.owner;
-            if (offset < 0) {
-                if (byte_delta > position) {
-                    throw std::runtime_error(
-                        xorstr_("Concept VM pointer offset is out of bounds"));
-                }
-                position -= byte_delta;
-            } else {
-                if (byte_delta >
-                    std::numeric_limits<std::uint64_t>::max() -
-                        position) {
-                    throw std::runtime_error(
-                        xorstr_("Concept VM pointer offset overflow"));
-                }
-                position += byte_delta;
-            }
             if (adjusted.kind == PointerTarget::Kind::heap_block) {
-                auto& block = heap_block(adjusted.owner);
-                if (adjusted.index > block.bytes.size()) {
-                    throw std::runtime_error(
-                        xorstr_("Concept VM pointer offset is out of bounds"));
+                const HeapPointerKey key{
+                    adjusted.owner, adjusted.index, adjusted.native_type};
+                const auto existing = heap_pointer_handles.find(key);
+                if (existing != heap_pointer_handles.end()) {
+                    stack.push_back(existing->second);
+                    break;
                 }
+                pointer_heap.push_back(adjusted);
+                const auto cached_handle = pointer_heap.size();
+                heap_pointer_handles.emplace(key, cached_handle);
+                stack.push_back(cached_handle);
+                break;
             }
             pointer_heap.push_back(adjusted);
             stack.push_back(pointer_heap.size());
@@ -2024,6 +2087,25 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::store_indirect: {
             const auto [pointer, value] = pop_binary(reordered);
             store_pointer(pointer, value);
+            break;
+        }
+        case Op::load_indexed: {
+            const auto type = read_type(bytecode.code, ip);
+            const auto offset = pop();
+            const auto pointer = pop();
+            const auto target =
+                offset_pointer_target(pointer, offset, type);
+            stack.push_back(load_pointer_target(target));
+            break;
+        }
+        case Op::store_indexed: {
+            const auto type = read_type(bytecode.code, ip);
+            const auto value = pop();
+            const auto offset = pop();
+            const auto pointer = pop();
+            const auto target =
+                offset_pointer_target(pointer, offset, type);
+            store_pointer_target(target, value);
             break;
         }
         case Op::pop:
@@ -2339,6 +2421,9 @@ std::int64_t execute(const Bytecode& bytecode) {
                                 : 0);
             break;
         }
+        case Op::set_complexity:
+            frames.back().complexity = bytecode.code[ip++];
+            break;
         case Op::return_value: {
             const auto result = pop();
             const auto stack_base = frames.back().stack_base;

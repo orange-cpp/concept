@@ -65,17 +65,21 @@ fn std::rsa::double_mod(u64* value, u64* modulus, u64 count) -> bool {
     return true;
 }
 
-fn std::rsa::montgomery_multiply(
+fn std::rsa::montgomery_multiply_scratch(
     u64* left, u64* right, u64* modulus, u64 count, u64 inverse,
-    u64* output) -> bool {
+    u64* output, u64* product) -> bool {
     u64 total_count = count * 2 + 2;
-    u64* product = malloc(total_count * 8);
     u64 outer = 0;
     u64 inner = 0;
     u64 multiplier = 0;
     u64 carry = 0;
     u64 combined = 0;
     u64 position = 0;
+    while (outer < total_count) {
+        product[outer] = 0;
+        outer = outer + 1;
+    }
+    outer = 0;
     while (outer < count) {
         inner = 0;
         while (inner < count) {
@@ -127,8 +131,17 @@ fn std::rsa::montgomery_multiply(
             std::rsa::subtract_limbs(output, modulus, count);
         }
     }
-    free(product);
     return true;
+}
+
+fn std::rsa::montgomery_multiply(
+    u64* left, u64* right, u64* modulus, u64 count, u64 inverse,
+    u64* output) -> bool {
+    u64* product = malloc((count * 2 + 2) * 8);
+    bool result = std::rsa::montgomery_multiply_scratch(
+        left, right, modulus, count, inverse, output, product);
+    free(product);
+    return result;
 }
 
 fn std::rsa::public_65537(

@@ -83,6 +83,8 @@ enum class Op : std::uint8_t {
     pointer_offset,
     load_indirect,
     store_indirect,
+    load_indexed,
+    store_indexed,
     input_text,
     input_i64,
     input_f64,
@@ -104,6 +106,7 @@ enum class Op : std::uint8_t {
     socket_send_bytes,
     socket_receive_bytes,
     socket_close,
+    set_complexity,
     return_value,
 };
 

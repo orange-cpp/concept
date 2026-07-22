@@ -175,11 +175,12 @@ The bootstrap subset supports:
   assignment, pointer-to-pointer values, and pointers to locals or fields;
 
 Functions can use `@complexity(level)`, where `level` is from `0` to `100`.
-Level `0` emits straight bytecode. Higher levels add progressively more opaque
-branches, shuffled control-flow paths, and unreachable stack-balanced junk
-instructions to that function. `@complexty(level)` is also accepted as an
-alias for compatibility with the original spelling. The calculator example
-uses level `100`.
+Level `0` emits straight bytecode and selects the VM's optimized handlers,
+skipping per-instruction mutation calculations. Higher levels enable randomized
+handler shapes and add progressively more opaque branches, shuffled control-flow
+paths, and unreachable stack-balanced junk instructions to that function.
+`@complexty(level)` is also accepted as an alias for compatibility with the
+original spelling. The calculator example uses level `100`.
 
 Class instances are created with calls such as `Counter(42)`. A class may
 declare one `constructor(...)`; inside it and every method, `this` is the
@@ -297,8 +298,8 @@ state written in one context is immediately visible after a context switch.
 | Random region direction | A seed bit selects whether the complete physical opcode-and-operand byte sequence for that region is stored forward or reversed. The runtime restores the direction before decoding opcodes. | This changes storage layout, not Concept control-flow semantics. |
 | Rolling bytecode encoding | After opcode mapping and direction selection, every opcode and operand byte is transformed with a per-region rolling state derived from the image key, nonce, region boundaries, and VM seed. Each ciphertext byte feeds the next state. | Required decoding material ships with the executable. |
 | Encoded-code checksum | The loader verifies the stored encoded stream before attempting to decode it. | This detects accidental damage or simple tampering; it is not authentication against an attacker who can rewrite the executable. |
-| Handler mutation | Every VM seed and opcode select one of four precompiled native handler shapes. The shapes reorder safe operand extraction or argument transfer, use equivalent integral arithmetic and mirrored comparisons, and perform different side-effect-free junk calculations. | All shapes remain in the native VM; this is runtime path variation, not generated native machine-code mutation. |
-| `@complexity(n)` | The compiler can add opaque predicates, junk instructions, decoy paths, trampoline jumps, and fragmented control flow, scaled from straight bytecode at `0` to the strongest available transformation at `100`. | It increases bytecode size and analysis cost without changing program results or creating a security boundary. |
+| Handler mutation | For functions above complexity `0`, every VM seed and opcode select one of four precompiled native handler shapes. The shapes reorder safe operand extraction or argument transfer, use equivalent integral arithmetic and mirrored comparisons, and perform different side-effect-free junk calculations. Complexity `0` bypasses this work. | All shapes remain in the native VM; this is runtime path variation, not generated native machine-code mutation. |
+| `@complexity(n)` | The compiler can add opaque predicates, junk instructions, decoy paths, trampoline jumps, and fragmented control flow, scaled from optimized straight bytecode at `0` to the strongest available transformation at `100`. | Higher settings deliberately trade execution speed for analysis cost without changing program results or creating a security boundary. |
 
 Because region seeds, image keys, and nonces are freshly generated, compiling
 identical source twice normally produces a different bytecode image and can
@@ -412,6 +413,11 @@ The implemented profile is intentionally narrow:
   fields are supplied;
 - HTTP/1.1 GET with `Connection: close`, authenticated `close_notify`, and the
   raw response returned to the caller.
+
+The pure-Concept P-256 verifier uses a nine-limb radix-29 representation,
+precomputed Montgomery constants, reusable arithmetic workspaces, and fused VM
+indexed memory instructions. These optimizations do not add native crypto
+operations or weaken certificate/signature validation.
 
 [`examples/https-libomath.concept`](examples/https-libomath.concept) demonstrates
 the normal no-pin API. [`examples/https.concept`](examples/https.concept) and
