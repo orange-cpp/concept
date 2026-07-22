@@ -2818,7 +2818,8 @@ private:
                name == "__win_api_call" || name == "malloc" ||
                name == "free" || name == "entropy_fill" ||
                name == "string_length" || name == "string_byte" ||
-               name == "string_from_bytes";
+               name == "string_from_bytes" ||
+               name == "system_verify_x509";
     }
 
     [[nodiscard]] ValueType builtin_type(const Expr& expression) const {
@@ -2907,6 +2908,30 @@ private:
                      "string byte index must be integral");
             }
             return ValueType::u8;
+        }
+        if (expression.name == "system_verify_x509") {
+            require_arguments(3);
+            const auto host = semantic_type(*expression.arguments[0]);
+            const auto certificates =
+                semantic_type(*expression.arguments[1]);
+            const auto length = semantic_type(*expression.arguments[2]);
+            if (host.pointer_depth != 0 || !host.class_name.empty() ||
+                host.type != ValueType::text) {
+                fail(expression.arguments[0]->token,
+                     "system certificate hostname must be a string");
+            }
+            if (certificates.pointer_depth != 1 ||
+                certificates.type != ValueType::u8 ||
+                !certificates.class_name.empty()) {
+                fail(expression.arguments[1]->token,
+                     "system certificate chain must be a u8 pointer");
+            }
+            if (length.pointer_depth != 0 || !length.class_name.empty() ||
+                !is_integral(length.type)) {
+                fail(expression.arguments[2]->token,
+                     "system certificate chain length must be integral");
+            }
+            return ValueType::boolean;
         }
         if (expression.name == "__win_api_call") {
 #ifndef _WIN64
@@ -3003,6 +3028,13 @@ private:
             compile_expression_as(*expression.arguments[0], ValueType::text);
             compile_expression_as(*expression.arguments[1], ValueType::u64);
             emit(Op::text_byte);
+            return result_type;
+        }
+        if (expression.name == "system_verify_x509") {
+            compile_expression_as(*expression.arguments[0], ValueType::text);
+            static_cast<void>(compile_expression(*expression.arguments[1]));
+            compile_expression_as(*expression.arguments[2], ValueType::u64);
+            emit(Op::system_verify_x509);
             return result_type;
         }
         if (expression.name == "__win_api_call") {

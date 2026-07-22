@@ -390,13 +390,15 @@ operations therefore never load Winsock. This removes the obvious socket API
 from the PE import table, but runtime inspection can still observe the module
 after it is loaded.
 
-## Pure-Concept HTTPS profile
+## Concept HTTPS profile
 
 `import std::https;` provides an HTTPS GET client whose TLS 1.3 record layer,
-handshake, transcript, key schedule, certificate authentication, and HTTP
-formatting are all implemented in `.concept` sources. The VM supplies only
-generic entropy, byte-buffer/string conversion, and TCP byte transport; it has
-no TLS or HTTP opcode and does not call a system TLS library.
+handshake, transcript, key schedule, CertificateVerify authentication, and HTTP
+formatting are implemented in `.concept` sources. By default on Windows, the VM
+passes the peer's DER certificate chain and requested hostname to the operating
+system certificate store. Concept then extracts the authenticated leaf public
+key and verifies the TLS CertificateVerify message itself. The VM does not call
+a system TLS library and has no TLS or HTTP opcode.
 
 The implemented profile is intentionally narrow:
 
@@ -405,24 +407,32 @@ The implemented profile is intentionally narrow:
 - either `rsa_pss_rsae_sha256` (`0x0804`) with a 2048-bit RSA modulus,
   exponent 65537, and a 32-byte PSS salt, or
   `ecdsa_secp256r1_sha256` (`0x0403`) with an uncompressed P-256 public key;
-- an exact SHA-256 pin of the leaf certificate DER plus the matching RSA or
-  ECDSA public-key pin supplied by the caller;
+- Windows system-store chain and hostname validation by default, or an exact
+  SHA-256 leaf-certificate pin plus its RSA/ECDSA public key when explicit pin
+  fields are supplied;
 - HTTP/1.1 GET with `Connection: close`, authenticated `close_notify`, and the
   raw response returned to the caller.
 
-See [`examples/https.concept`](examples/https.concept) for RSA and
-[`examples/https-ecdsa.concept`](examples/https-ecdsa.concept) for P-256. A
-failed certificate pin, CertificateVerify signature, Finished MAC, AEAD tag,
-selected cipher/group/version, or malformed record makes `get()` fail closed
-and places a short diagnostic in `error`. The pinned live-endpoint example in
-[`examples/https-libomath.concept`](examples/https-libomath.concept) performs a
-GET request to `https://libomath.org/`.
+[`examples/https-libomath.concept`](examples/https-libomath.concept) demonstrates
+the normal no-pin API. [`examples/https.concept`](examples/https.concept) and
+[`examples/https-ecdsa.concept`](examples/https-ecdsa.concept) demonstrate the
+optional RSA and P-256 pin modes. Supplying any pin-related field selects pin
+mode, and incomplete pin settings fail instead of silently falling back to the
+system store. A failed chain, hostname, pin, CertificateVerify signature,
+Finished MAC, AEAD tag, selected cipher/group/version, or malformed record makes
+`get()` fail closed and places a short diagnostic in `error`.
+
+The Windows certificate component (`Crypt32`) and its entry points are resolved
+only when system validation executes; they are not static PE imports and their
+names are protected with `xorstr_`. System validation checks the chain against
+Windows trusted roots and applies the SSL hostname policy. It does not force an
+online revocation check. On non-Windows systems the default system-trust mode is
+currently unavailable, while explicit pin mode remains usable.
 
 This is an educational implementation, not a production TLS stack. It does not
-implement the Web PKI, hostname/expiry/revocation checking, AES-GCM, session
-resumption, HelloRetryRequest, client certificates, or constant-time audited
-cryptography. Update the certificate and public-key pins deliberately when the
-server certificate or key changes.
+implement AES-GCM, session resumption, HelloRetryRequest, client certificates,
+IDNA conversion, or constant-time audited cryptography. Explicit pins must be
+updated deliberately when the server certificate or key changes.
 
 Self-hosting is a later bootstrap stage: extend this subset until a Concept
 compiler can be written in Concept, compile it with the C++ compiler, then package

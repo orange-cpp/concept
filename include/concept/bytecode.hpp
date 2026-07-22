@@ -90,6 +90,7 @@ enum class Op : std::uint8_t {
     text_length,
     text_byte,
     text_from_bytes,
+    system_verify_x509,
     print,
     println,
     native_call,

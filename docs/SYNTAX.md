@@ -603,13 +603,13 @@ are resolved by the underlying socket connection.
 The current socket text receive operation returns at most 4096 bytes, so
 `response` contains the first response block. The module does not yet decode
 headers, redirects, chunked transfer encoding, or content encodings. Use
-`std::https` for the pinned TLS 1.3 profile below. All HTTP request formatting
+`std::https` for the TLS 1.3 profile below. All HTTP request formatting
 and control flow are defined in Concept source; the VM contains no
 HTTP-specific implementation.
 
 ## Binary buffers and cryptography
 
-The VM exposes four generic binary helpers used by the Concept standard
+The VM exposes five binary and host-trust helpers used by the Concept standard
 library:
 
 | Function | Meaning |
@@ -618,6 +618,7 @@ library:
 | `string_length(string value)` | Return the byte length of text |
 | `string_byte(string value, index)` | Read one checked text byte |
 | `string_from_bytes(u8* input, count)` | Create text preserving every byte, including zero |
+| `system_verify_x509(string host, u8* chain, count)` | Validate a length-prefixed DER chain and hostname with the host certificate policy; currently implemented on Windows |
 
 `std::bytes` in `concept/std/bytes.concept` owns a growable `u8` buffer. Its
 methods include `reserve`, `resize`, `append`, big-endian `append_u16`/`u24`/
@@ -635,24 +636,17 @@ not constant-time or independently audited.
 
 ## `std::https`
 
-`std::https` performs a TLS 1.3 HTTP/1.1 GET entirely in Concept source:
+`std::https` performs a TLS 1.3 HTTP/1.1 GET with its protocol and
+cryptographic operations implemented in Concept source:
 
 ```c
 import std::https;
 
 fn main() -> int {
-    u8* leaf_pin = malloc(32);       // SHA-256 of leaf certificate DER
-    u8* rsa_modulus = malloc(256);   // matching big-endian RSA modulus
-    // Fill both buffers with values obtained through a trusted channel.
-
     std::https request;
     request.host = "api.example.com";
     request.path = "/status";
     request.port = u16(443);
-    request.certificate_sha256 = leaf_pin;
-    request.certificate_sha256_length = 32;
-    request.rsa_modulus = rsa_modulus;
-    request.rsa_modulus_length = 256;
 
     if (!request.get()) {
         println(request.error);
@@ -663,44 +657,56 @@ fn main() -> int {
 }
 ```
 
-For an ECDSA endpoint, provide the 65-byte uncompressed SEC1 point instead of
-the RSA modulus:
+With every pin length left at zero, `get()` uses the operating system trust
+store. On Windows it validates the peer's full X.509 chain and requested
+hostname, then extracts the authenticated leaf key in Concept and verifies the
+TLS CertificateVerify signature. The host boundary loads `Crypt32` and resolves
+its certificate functions only when this path executes; there is no static
+`Crypt32.dll` import. Hostnames should be ASCII or already IDNA-encoded.
+
+Explicit pinning is optional. Supplying any pin-related field selects pin mode,
+which requires the exact SHA-256 of the leaf certificate DER and either its
+2048-bit RSA modulus or 65-byte uncompressed P-256 SEC1 point:
 
 ```c
+u8* leaf_pin = malloc(32);
 u8* public_key = malloc(65); // 0x04 || 32-byte X || 32-byte Y
-// Fill public_key through a trusted channel.
+// Fill both buffers through a trusted channel.
+request.certificate_sha256 = leaf_pin;
+request.certificate_sha256_length = 32;
 request.ecdsa_public_key = public_key;
 request.ecdsa_public_key_length = 65;
 ```
 
-At least one authentication key is required. If both valid key lengths are
-configured, the ClientHello advertises both schemes and verifies whichever one
-the server selects.
+For RSA pinning, set `rsa_modulus` and `rsa_modulus_length = 256` instead. If
+both valid key lengths are configured, the ClientHello advertises both schemes
+and verifies whichever one the server selects. An incomplete pin configuration
+fails immediately and never falls back to system trust.
 
 Port `0` defaults to `443`, and an empty path defaults to `"/"`. On success,
 `response` contains the complete raw HTTP response received before TLS shutdown.
-On failure, `error` describes the failed stage. The complete executable example
-at `examples/https.concept` shows RSA pin decoding, while
-`examples/https-ecdsa.concept` shows P-256. The peer must send an authenticated
-TLS `close_notify`; an unauthenticated TCP EOF is rejected to avoid treating a
-truncated raw response as complete.
+On failure, `error` describes the failed stage. The complete example at
+`examples/https-libomath.concept` uses normal system trust;
+`examples/https.concept` shows RSA pin decoding and
+`examples/https-ecdsa.concept` shows P-256 pinning. The peer must send an
+authenticated TLS `close_notify`; an unauthenticated TCP EOF is rejected to
+avoid treating a truncated raw response as complete.
 
 The current interoperable profile requires TLS 1.3, X25519, and
 `TLS_CHACHA20_POLY1305_SHA256`. CertificateVerify may use either
 `rsa_pss_rsae_sha256` with a 2048-bit RSA key using exponent 65537 or
-`ecdsa_secp256r1_sha256` with a P-256 key. The client validates the exact leaf
-DER pin, verifies CertificateVerify with the separately pinned public key,
-verifies Finished and every AEAD tag, and rejects malformed or unsupported
-handshake data.
+`ecdsa_secp256r1_sha256` with a P-256 key. In default mode the Windows SSL chain
+policy checks trusted roots, certificate validity and usage, and hostname; an
+online revocation check is not forced. In pin mode the client instead validates
+the exact leaf DER pin and verifies CertificateVerify with the separately
+pinned public key. Both modes verify Finished and every AEAD tag and reject
+malformed or unsupported handshake data. Default system trust currently returns
+failure on non-Windows hosts; explicit pin mode remains cross-platform.
 
-This direct-pinning profile does not parse Web-PKI chains or check hostname,
-validity dates, revocation, certificate policies, or public-key consistency
-inside X.509. The caller must obtain both pins through a trusted channel and
-replace them deliberately when the endpoint rotates its certificate or key.
 There is no AES-GCM, HelloRetryRequest, session resumption, KeyUpdate, client
-certificate, HTTP redirect, content decoding, or chunked-body decoder. The
-cryptographic code has not been audited for constant-time behavior and is not
-production-safe.
+certificate, automatic IDNA conversion, HTTP redirect, content decoding, or
+chunked-body decoder. The cryptographic code has not been audited for
+constant-time behavior and is not production-safe.
 
 ## `std::Socket`
 

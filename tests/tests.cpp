@@ -1097,6 +1097,14 @@ void binary_buffer_test() {
             std::bytes random;
             if (!random.fill_random(32)) { return 9; }
             if (random.length != 32) { return 10; }
+
+            u8* invalid_chain = malloc(1);
+            invalid_chain[0] = u8(0);
+            bool invalid_trusted = system_verify_x509(
+                "localhost", invalid_chain, 1);
+            free(invalid_chain);
+            if (invalid_trusted) { return 11; }
+
             random.destroy();
             buffer.destroy();
             return 42;

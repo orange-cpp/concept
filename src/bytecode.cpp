@@ -18,7 +18,7 @@ namespace {
 constexpr std::array<std::uint8_t, 8> bytecode_magic{
     'C', 'O', 'N', 'C', 'E', 'P', 'T', 0,
 };
-constexpr std::uint32_t bytecode_version = 18;
+constexpr std::uint32_t bytecode_version = 19;
 constexpr std::size_t opcode_count =
     static_cast<std::size_t>(Op::return_value) + 1;
 
@@ -122,6 +122,7 @@ std::size_t operand_size(const Op op) {
     case Op::text_length:
     case Op::text_byte:
     case Op::text_from_bytes:
+    case Op::system_verify_x509:
     case Op::native_call:
     case Op::socket_open:
     case Op::socket_connect:

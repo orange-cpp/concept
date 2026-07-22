@@ -1,9 +1,10 @@
-// Educational, pure-Concept TLS 1.3 HTTPS client.
+// Educational TLS 1.3 HTTPS client.
 //
 // Supported profile: X25519, TLS_CHACHA20_POLY1305_SHA256, and either
 // rsa_pss_rsae_sha256 with a 2048-bit RSA key or
 // ecdsa_secp256r1_sha256 with a 65-byte uncompressed P-256 public key.
-// Authentication also requires a SHA-256 pin of the leaf certificate DER.
+// By default the operating system validates the X.509 chain and hostname.
+// Setting any pin field selects explicit leaf-certificate pinning instead.
 
 import std::ecdsa;
 import std::socket;
@@ -334,9 +335,111 @@ fn std::tls::parse_server_hello(
     return key_found;
 }
 
-fn std::tls::verify_leaf_certificate(
-    u8* message, u64 message_length, u8* expected_hash) -> bool {
+fn std::tls::der_read(
+    u8* data, u64 total, u64 offset, u8 expected_tag,
+    u64* content_offset, u64* content_length) -> bool {
+    if (offset + 2 > total) {
+        return false;
+    }
+    if (data[offset] != expected_tag) {
+        return false;
+    }
+    u64 first = u64(data[offset + 1]);
+    u64 header_length = 2;
+    u64 length = 0;
+    if (first < 128) {
+        length = first;
+    } else {
+        u64 length_bytes = first & u64(0x7f);
+        if (length_bytes == 0) {
+            return false;
+        }
+        if (length_bytes > 4) {
+            return false;
+        }
+        if (offset + 2 + length_bytes > total) {
+            return false;
+        }
+        if (data[offset + 2] == u8(0)) {
+            return false;
+        }
+        u64 index = 0;
+        while (index < length_bytes) {
+            length = (length << 8) | u64(data[offset + 2 + index]);
+            index = index + 1;
+        }
+        if (length < 128) {
+            return false;
+        }
+        header_length = 2 + length_bytes;
+    }
+    if (offset + header_length + length > total) {
+        return false;
+    }
+    *content_offset = offset + header_length;
+    *content_length = length;
+    return true;
+}
+
+fn std::tls::der_next(
+    u8* data, u64 total, u64 offset, u8 expected_tag) -> i64 {
+    u64 content = 0;
+    u64 length = 0;
+    if (!std::tls::der_read(
+        data, total, offset, expected_tag, &content, &length)) {
+        return -1;
+    }
+    return i64(content + length);
+}
+
+fn std::tls::oid_is_rsa(u8* value, u64 length) -> bool {
+    if (length != 9) { return false; }
+    if (value[0] != u8(0x2a)) { return false; }
+    if (value[1] != u8(0x86)) { return false; }
+    if (value[2] != u8(0x48)) { return false; }
+    if (value[3] != u8(0x86)) { return false; }
+    if (value[4] != u8(0xf7)) { return false; }
+    if (value[5] != u8(0x0d)) { return false; }
+    if (value[6] != u8(0x01)) { return false; }
+    if (value[7] != u8(0x01)) { return false; }
+    return value[8] == u8(0x01);
+}
+
+fn std::tls::oid_is_ec_public_key(u8* value, u64 length) -> bool {
+    if (length != 7) { return false; }
+    if (value[0] != u8(0x2a)) { return false; }
+    if (value[1] != u8(0x86)) { return false; }
+    if (value[2] != u8(0x48)) { return false; }
+    if (value[3] != u8(0xce)) { return false; }
+    if (value[4] != u8(0x3d)) { return false; }
+    if (value[5] != u8(0x02)) { return false; }
+    return value[6] == u8(0x01);
+}
+
+fn std::tls::oid_is_p256(u8* value, u64 length) -> bool {
+    if (length != 8) { return false; }
+    if (value[0] != u8(0x2a)) { return false; }
+    if (value[1] != u8(0x86)) { return false; }
+    if (value[2] != u8(0x48)) { return false; }
+    if (value[3] != u8(0xce)) { return false; }
+    if (value[4] != u8(0x3d)) { return false; }
+    if (value[5] != u8(0x03)) { return false; }
+    if (value[6] != u8(0x01)) { return false; }
+    return value[7] == u8(0x07);
+}
+
+fn std::tls::certificate_leaf(
+    u8* message, u64 message_length,
+    u64* certificate_offset, u64* certificate_length) -> bool {
     if (message_length < 12) {
+        return false;
+    }
+    if (message[0] != u8(11)) {
+        return false;
+    }
+    u64 declared = (u64(message[1]) << 16) |
+        (u64(message[2]) << 8) | u64(message[3]);
+    if (declared + 4 != message_length) {
         return false;
     }
     u64 context_length = u64(message[4]);
@@ -353,22 +456,262 @@ fn std::tls::verify_leaf_certificate(
     if (list_length < 5) {
         return false;
     }
-    u64 certificate_length = (u64(message[cursor]) << 16) |
+    u64 leaf_length = (u64(message[cursor]) << 16) |
         (u64(message[cursor + 1]) << 8) | u64(message[cursor + 2]);
     cursor = cursor + 3;
-    if (cursor + certificate_length + 2 > message_length) {
+    if (leaf_length == 0) {
         return false;
     }
-    u64 extensions_length = (u64(message[cursor + certificate_length]) << 8) |
-        u64(message[cursor + certificate_length + 1]);
-    if (cursor + certificate_length + 2 + extensions_length > message_length) {
+    if (cursor + leaf_length + 2 > message_length) {
+        return false;
+    }
+    *certificate_offset = cursor;
+    *certificate_length = leaf_length;
+    return true;
+}
+
+fn std::tls::verify_leaf_certificate(
+    u8* message, u64 message_length, u8* expected_hash) -> bool {
+    u64 certificate_offset = 0;
+    u64 certificate_length = 0;
+    if (!std::tls::certificate_leaf(
+        message, message_length, &certificate_offset, &certificate_length)) {
         return false;
     }
     u8* actual_hash = malloc(32);
-    std::crypto::sha256(message + cursor, certificate_length, actual_hash);
+    std::crypto::sha256(
+        message + certificate_offset, certificate_length, actual_hash);
     bool valid = std::tls::equal(actual_hash, expected_hash, 32);
     free(actual_hash);
     return valid;
+}
+
+fn std::tls::verify_system_certificate(
+    string host, u8* message, u64 message_length) -> bool {
+    u64 leaf_offset = 0;
+    u64 leaf_length = 0;
+    if (!std::tls::certificate_leaf(
+        message, message_length, &leaf_offset, &leaf_length)) {
+        return false;
+    }
+    u64 context_length = u64(message[4]);
+    u64 cursor = 5 + context_length;
+    if (cursor + 3 > message_length) {
+        return false;
+    }
+    u64 list_length = (u64(message[cursor]) << 16) |
+        (u64(message[cursor + 1]) << 8) | u64(message[cursor + 2]);
+    cursor = cursor + 3;
+    u64 list_end = cursor + list_length;
+    if (list_end != message_length) {
+        return false;
+    }
+    std::bytes certificates;
+    u64 certificate_count = 0;
+    u64 certificate_length = 0;
+    u64 extensions_length = 0;
+    while (cursor < list_end) {
+        if (cursor + 3 > list_end) {
+            certificates.destroy();
+            return false;
+        }
+        certificate_length = (u64(message[cursor]) << 16) |
+            (u64(message[cursor + 1]) << 8) | u64(message[cursor + 2]);
+        cursor = cursor + 3;
+        if (certificate_length == 0) {
+            certificates.destroy();
+            return false;
+        }
+        if (cursor + certificate_length + 2 > list_end) {
+            certificates.destroy();
+            return false;
+        }
+        certificates.append_u32(u32(certificate_length));
+        certificates.append_bytes(message + cursor, certificate_length);
+        cursor = cursor + certificate_length;
+        extensions_length = (u64(message[cursor]) << 8) |
+            u64(message[cursor + 1]);
+        cursor = cursor + 2;
+        if (cursor + extensions_length > list_end) {
+            certificates.destroy();
+            return false;
+        }
+        cursor = cursor + extensions_length;
+        certificate_count = certificate_count + 1;
+    }
+    if (certificate_count == 0) {
+        certificates.destroy();
+        return false;
+    }
+    bool valid = system_verify_x509(
+        host, certificates.data, certificates.length);
+    certificates.destroy();
+    return valid;
+}
+
+fn std::tls::extract_leaf_public_key(
+    u8* certificate, u64 certificate_length,
+    u8* rsa_modulus, u8* ecdsa_public_key) -> i32 {
+    u64 outer_content = 0;
+    u64 outer_length = 0;
+    u64 tbs_content = 0;
+    u64 tbs_length = 0;
+    u64 item_content = 0;
+    u64 item_length = 0;
+    u64 algorithm_content = 0;
+    u64 algorithm_length = 0;
+    u64 oid_content = 0;
+    u64 oid_length = 0;
+    u64 bit_content = 0;
+    u64 bit_length = 0;
+    u64 cursor = 0;
+    u64 index = 0;
+    i64 next = 0;
+    if (!std::tls::der_read(
+        certificate, certificate_length, 0, u8(0x30),
+        &outer_content, &outer_length)) {
+        return 0;
+    }
+    if (outer_content + outer_length != certificate_length) {
+        return 0;
+    }
+    if (!std::tls::der_read(
+        certificate, certificate_length, outer_content, u8(0x30),
+        &tbs_content, &tbs_length)) {
+        return 0;
+    }
+    cursor = tbs_content;
+    if (cursor >= tbs_content + tbs_length) {
+        return 0;
+    }
+    if (certificate[cursor] == u8(0xa0)) {
+        next = std::tls::der_next(
+            certificate, certificate_length, cursor, u8(0xa0));
+        if (next < 0) { return 0; }
+        cursor = u64(next);
+    }
+    next = std::tls::der_next(
+        certificate, certificate_length, cursor, u8(0x02));
+    if (next < 0) { return 0; }
+    cursor = u64(next);
+    u64 skipped = 0;
+    while (skipped < 4) {
+        next = std::tls::der_next(
+            certificate, certificate_length, cursor, u8(0x30));
+        if (next < 0) { return 0; }
+        cursor = u64(next);
+        skipped = skipped + 1;
+    }
+    if (!std::tls::der_read(
+        certificate, certificate_length, cursor, u8(0x30),
+        &item_content, &item_length)) {
+        return 0;
+    }
+    u64 subject_key_end = item_content + item_length;
+    if (!std::tls::der_read(
+        certificate, certificate_length, item_content, u8(0x30),
+        &algorithm_content, &algorithm_length)) {
+        return 0;
+    }
+    u64 algorithm_end = algorithm_content + algorithm_length;
+    if (!std::tls::der_read(
+        certificate, certificate_length, algorithm_content, u8(0x06),
+        &oid_content, &oid_length)) {
+        return 0;
+    }
+    bool is_rsa = std::tls::oid_is_rsa(
+        certificate + oid_content, oid_length);
+    bool is_ec = std::tls::oid_is_ec_public_key(
+        certificate + oid_content, oid_length);
+    cursor = oid_content + oid_length;
+    if (is_ec) {
+        if (!std::tls::der_read(
+            certificate, certificate_length, cursor, u8(0x06),
+            &item_content, &item_length)) {
+            return 0;
+        }
+        if (!std::tls::oid_is_p256(
+            certificate + item_content, item_length)) {
+            return 0;
+        }
+        if (item_content + item_length != algorithm_end) {
+            return 0;
+        }
+    } else {
+        if (!is_rsa) {
+            return 0;
+        }
+        if (cursor < algorithm_end) {
+            if (!std::tls::der_read(
+                certificate, certificate_length, cursor, u8(0x05),
+                &item_content, &item_length)) {
+                return 0;
+            }
+            if (item_length != 0) { return 0; }
+            if (item_content != algorithm_end) { return 0; }
+        }
+    }
+    if (!std::tls::der_read(
+        certificate, certificate_length, algorithm_end, u8(0x03),
+        &bit_content, &bit_length)) {
+        return 0;
+    }
+    if (bit_content + bit_length != subject_key_end) {
+        return 0;
+    }
+    if (bit_length == 0) { return 0; }
+    if (certificate[bit_content] != u8(0)) { return 0; }
+    if (is_ec) {
+        if (bit_length != 66) { return 0; }
+        index = 0;
+        while (index < 65) {
+            ecdsa_public_key[index] = certificate[bit_content + 1 + index];
+            index = index + 1;
+        }
+        if (ecdsa_public_key[0] != u8(4)) { return 0; }
+        return 2;
+    }
+
+    u64 key_sequence_content = 0;
+    u64 key_sequence_length = 0;
+    if (!std::tls::der_read(
+        certificate, certificate_length, bit_content + 1, u8(0x30),
+        &key_sequence_content, &key_sequence_length)) {
+        return 0;
+    }
+    if (key_sequence_content + key_sequence_length != bit_content + bit_length) {
+        return 0;
+    }
+    u64 modulus_content = 0;
+    u64 modulus_length = 0;
+    if (!std::tls::der_read(
+        certificate, certificate_length, key_sequence_content, u8(0x02),
+        &modulus_content, &modulus_length)) {
+        return 0;
+    }
+    if (modulus_length != 257) { return 0; }
+    if (certificate[modulus_content] != u8(0)) { return 0; }
+    u64 exponent_content = 0;
+    u64 exponent_length = 0;
+    if (!std::tls::der_read(
+        certificate, certificate_length, modulus_content + modulus_length,
+        u8(0x02), &exponent_content, &exponent_length)) {
+        return 0;
+    }
+    if (exponent_content + exponent_length !=
+        key_sequence_content + key_sequence_length) {
+        return 0;
+    }
+    if (exponent_length != 3) { return 0; }
+    if (certificate[exponent_content] != u8(1)) { return 0; }
+    if (certificate[exponent_content + 1] != u8(0)) { return 0; }
+    if (certificate[exponent_content + 2] != u8(1)) { return 0; }
+    index = 0;
+    while (index < 256) {
+        rsa_modulus[index] = certificate[modulus_content + 1 + index];
+        index = index + 1;
+    }
+    return 1;
 }
 
 fn std::tls::verify_certificate_signature(
@@ -486,19 +829,32 @@ class std::https {
         if (this.port == u16(0)) {
             this.port = u16(443);
         }
-        if (this.certificate_sha256_length != 32) {
-            this.error = "a 32-byte leaf certificate pin is required";
-            return false;
-        }
         bool rsa_enabled = this.rsa_modulus_length == 256;
         bool ecdsa_enabled = this.ecdsa_public_key_length == 65;
+        bool pin_configuration = this.certificate_sha256_length != 0;
+        if (this.rsa_modulus_length != 0) {
+            pin_configuration = true;
+        }
+        if (this.ecdsa_public_key_length != 0) {
+            pin_configuration = true;
+        }
+        bool system_trust = !pin_configuration;
         bool authentication_available = rsa_enabled;
         if (ecdsa_enabled) {
             authentication_available = true;
         }
-        if (!authentication_available) {
-            this.error = "an RSA or P-256 authentication pin is required";
-            return false;
+        if (!system_trust) {
+            if (this.certificate_sha256_length != 32) {
+                this.error = "a complete 32-byte certificate pin is required";
+                return false;
+            }
+            if (!authentication_available) {
+                this.error = "an RSA or P-256 authentication pin is required";
+                return false;
+            }
+        } else {
+            rsa_enabled = true;
+            ecdsa_enabled = true;
         }
 
         std::Socket connection = std::Socket();
@@ -623,6 +979,17 @@ class std::https {
         u64 message_length = 0;
         u64 message_total = 0;
         i32 inner_type = 0;
+        u8* system_rsa_modulus = malloc(256);
+        u8* system_ecdsa_public_key = malloc(65);
+        u8* authentication_rsa_modulus = this.rsa_modulus;
+        u64 authentication_rsa_modulus_length = this.rsa_modulus_length;
+        u8* authentication_ecdsa_public_key = this.ecdsa_public_key;
+        u64 authentication_ecdsa_public_key_length =
+            this.ecdsa_public_key_length;
+        u64 certificate_offset = 0;
+        u64 certificate_length = 0;
+        i32 certificate_key_type = 0;
+        bool certificate_valid = false;
         while (stage < 4) {
             outer_type = std::tls::receive_record(
                 connection, record_header, record);
@@ -679,10 +1046,57 @@ class std::https {
                             if (message_type != u8(11)) {
                                 handshake_failed = true;
                             } else {
-                                if (!std::tls::verify_leaf_certificate(
-                                    pending.data + pending_cursor,
-                                    message_total,
-                                    this.certificate_sha256)) {
+                                certificate_valid = false;
+                                if (system_trust) {
+                                    certificate_valid =
+                                        std::tls::verify_system_certificate(
+                                            this.host,
+                                            pending.data + pending_cursor,
+                                            message_total);
+                                    if (certificate_valid) {
+                                        certificate_valid =
+                                            std::tls::certificate_leaf(
+                                                pending.data + pending_cursor,
+                                                message_total,
+                                                &certificate_offset,
+                                                &certificate_length);
+                                    }
+                                    if (certificate_valid) {
+                                        certificate_key_type =
+                                            std::tls::extract_leaf_public_key(
+                                                pending.data + pending_cursor +
+                                                    certificate_offset,
+                                                certificate_length,
+                                                system_rsa_modulus,
+                                                system_ecdsa_public_key);
+                                        if (certificate_key_type == 1) {
+                                            authentication_rsa_modulus =
+                                                system_rsa_modulus;
+                                            authentication_rsa_modulus_length =
+                                                256;
+                                            authentication_ecdsa_public_key_length =
+                                                0;
+                                        } else {
+                                            if (certificate_key_type == 2) {
+                                                authentication_ecdsa_public_key =
+                                                    system_ecdsa_public_key;
+                                                authentication_ecdsa_public_key_length =
+                                                    65;
+                                                authentication_rsa_modulus_length =
+                                                    0;
+                                            } else {
+                                                certificate_valid = false;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    certificate_valid =
+                                        std::tls::verify_leaf_certificate(
+                                            pending.data + pending_cursor,
+                                            message_total,
+                                            this.certificate_sha256);
+                                }
+                                if (!certificate_valid) {
                                     handshake_failed = true;
                                 } else {
                                     transcript.append_bytes(
@@ -694,10 +1108,10 @@ class std::https {
                         if (stage == 2) {
                             if (!std::tls::verify_certificate_signature(
                                 transcript, pending.data + pending_cursor,
-                                message_total, this.rsa_modulus,
-                                this.rsa_modulus_length,
-                                this.ecdsa_public_key,
-                                this.ecdsa_public_key_length)) {
+                                message_total, authentication_rsa_modulus,
+                                authentication_rsa_modulus_length,
+                                authentication_ecdsa_public_key,
+                                authentication_ecdsa_public_key_length)) {
                                 handshake_failed = true;
                             } else {
                                 transcript.append_bytes(
@@ -732,7 +1146,12 @@ class std::https {
                     this.error = "expected EncryptedExtensions";
                 }
                 if (stage == 1) {
-                    this.error = "leaf certificate pin validation failed";
+                    if (system_trust) {
+                        this.error =
+                            "system certificate or hostname validation failed";
+                    } else {
+                        this.error = "leaf certificate pin validation failed";
+                    }
                 }
                 if (stage == 2) {
                     this.error = "CertificateVerify signature failed";
@@ -908,6 +1327,8 @@ class std::https {
         free(private_key);
         free(session_id);
         free(client_random);
+        free(system_ecdsa_public_key);
+        free(system_rsa_modulus);
         return true;
     }
 }

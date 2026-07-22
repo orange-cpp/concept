@@ -31,6 +31,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <wincrypt.h>
 #else
 #include <netdb.h>
 #include <sys/socket.h>
@@ -305,6 +306,71 @@ private:
     }
 };
 
+class CertificateApi {
+public:
+    decltype(&::CertCreateCertificateContext) create_context{};
+    decltype(&::CertFreeCertificateContext) free_context{};
+    decltype(&::CertOpenStore) open_store{};
+    decltype(&::CertCloseStore) close_store{};
+    decltype(&::CertAddCertificateContextToStore) add_context{};
+    decltype(&::CertGetCertificateChain) get_chain{};
+    decltype(&::CertFreeCertificateChain) free_chain{};
+    decltype(&::CertVerifyCertificateChainPolicy) verify_policy{};
+
+    CertificateApi() {
+        module_ = LoadLibraryA(xorstr_("crypt32.dll"));
+        if (module_ == nullptr) {
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not load system certificate support"));
+        }
+        try {
+            create_context = resolve<decltype(create_context)>(
+                xorstr_("CertCreateCertificateContext"));
+            free_context = resolve<decltype(free_context)>(
+                xorstr_("CertFreeCertificateContext"));
+            open_store = resolve<decltype(open_store)>(
+                xorstr_("CertOpenStore"));
+            close_store = resolve<decltype(close_store)>(
+                xorstr_("CertCloseStore"));
+            add_context = resolve<decltype(add_context)>(
+                xorstr_("CertAddCertificateContextToStore"));
+            get_chain = resolve<decltype(get_chain)>(
+                xorstr_("CertGetCertificateChain"));
+            free_chain = resolve<decltype(free_chain)>(
+                xorstr_("CertFreeCertificateChain"));
+            verify_policy = resolve<decltype(verify_policy)>(
+                xorstr_("CertVerifyCertificateChainPolicy"));
+        } catch (...) {
+            FreeLibrary(module_);
+            module_ = nullptr;
+            throw;
+        }
+    }
+
+    ~CertificateApi() {
+        if (module_ != nullptr) {
+            FreeLibrary(module_);
+        }
+    }
+
+    CertificateApi(const CertificateApi&) = delete;
+    CertificateApi& operator=(const CertificateApi&) = delete;
+
+private:
+    HMODULE module_{};
+
+    template <typename Function>
+    Function resolve(const char* name) {
+        const auto address = GetProcAddress(module_, name);
+        if (address == nullptr) {
+            throw std::runtime_error(xorstr_(
+                "Concept VM could not resolve system certificate support"));
+        }
+        static_assert(sizeof(Function) == sizeof(address));
+        return std::bit_cast<Function>(address);
+    }
+};
+
 WinsockApi& winsock_api() {
     static WinsockApi api;
     return api;
@@ -312,6 +378,11 @@ WinsockApi& winsock_api() {
 
 NativeMemoryApi& native_memory_api() {
     static NativeMemoryApi api;
+    return api;
+}
+
+CertificateApi& certificate_api() {
+    static CertificateApi api;
     return api;
 }
 
@@ -421,6 +492,111 @@ constexpr int send_flags = MSG_NOSIGNAL;
 constexpr int send_flags = 0;
 #endif
 #endif
+
+bool verify_system_x509_chain(
+    const std::string& host, const std::span<const std::uint8_t> encoded) {
+#ifdef _WIN32
+    if (host.empty() || encoded.empty()) {
+        return false;
+    }
+
+    try {
+        auto& api = certificate_api();
+        std::vector<PCCERT_CONTEXT> certificates;
+        std::size_t offset = 0;
+        while (offset < encoded.size()) {
+            if (encoded.size() - offset < 4) {
+                for (const auto certificate : certificates) {
+                    api.free_context(certificate);
+                }
+                return false;
+            }
+            const auto length =
+                (static_cast<std::uint32_t>(encoded[offset]) << 24) |
+                (static_cast<std::uint32_t>(encoded[offset + 1]) << 16) |
+                (static_cast<std::uint32_t>(encoded[offset + 2]) << 8) |
+                static_cast<std::uint32_t>(encoded[offset + 3]);
+            offset += 4;
+            if (length == 0 || length > encoded.size() - offset) {
+                for (const auto certificate : certificates) {
+                    api.free_context(certificate);
+                }
+                return false;
+            }
+            const auto certificate = api.create_context(
+                X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                encoded.data() + offset, length);
+            if (certificate == nullptr) {
+                for (const auto existing : certificates) {
+                    api.free_context(existing);
+                }
+                return false;
+            }
+            certificates.push_back(certificate);
+            offset += length;
+        }
+        if (certificates.empty()) {
+            return false;
+        }
+
+        const auto store = api.open_store(
+            CERT_STORE_PROV_MEMORY, 0, 0, CERT_STORE_CREATE_NEW_FLAG, nullptr);
+        if (store == nullptr) {
+            for (const auto certificate : certificates) {
+                api.free_context(certificate);
+            }
+            return false;
+        }
+        bool intermediates_added = true;
+        for (std::size_t index = 1; index < certificates.size(); ++index) {
+            if (api.add_context(store, certificates[index],
+                                CERT_STORE_ADD_ALWAYS, nullptr) == FALSE) {
+                intermediates_added = false;
+                break;
+            }
+        }
+
+        PCCERT_CHAIN_CONTEXT chain = nullptr;
+        CERT_CHAIN_PARA chain_parameters{};
+        chain_parameters.cbSize = sizeof(chain_parameters);
+        bool valid = intermediates_added &&
+                     api.get_chain(nullptr, certificates.front(), nullptr,
+                                   store, &chain_parameters, 0, nullptr,
+                                   &chain) != FALSE;
+        if (valid) {
+            std::wstring server_name(host.begin(), host.end());
+            SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl_parameters{};
+            ssl_parameters.cbSize = sizeof(ssl_parameters);
+            ssl_parameters.dwAuthType = AUTHTYPE_SERVER;
+            ssl_parameters.pwszServerName = server_name.data();
+            CERT_CHAIN_POLICY_PARA policy_parameters{};
+            policy_parameters.cbSize = sizeof(policy_parameters);
+            policy_parameters.pvExtraPolicyPara = &ssl_parameters;
+            CERT_CHAIN_POLICY_STATUS policy_status{};
+            policy_status.cbSize = sizeof(policy_status);
+            valid = api.verify_policy(
+                        CERT_CHAIN_POLICY_SSL, chain, &policy_parameters,
+                        &policy_status) != FALSE &&
+                    policy_status.dwError == S_OK;
+        }
+
+        if (chain != nullptr) {
+            api.free_chain(chain);
+        }
+        api.close_store(store, 0);
+        for (const auto certificate : certificates) {
+            api.free_context(certificate);
+        }
+        return valid;
+    } catch (...) {
+        return false;
+    }
+#else
+    static_cast<void>(host);
+    static_cast<void>(encoded);
+    return false;
+#endif
+}
 
 #ifdef _WIN64
 std::uint64_t invoke_native_call(
@@ -2048,6 +2224,17 @@ std::int64_t execute(const Bytecode& bytecode) {
                     reinterpret_cast<const char*>(bytes.data()), bytes.size());
             }
             stack.push_back(text_heap.size() - 1);
+            break;
+        }
+        case Op::system_verify_x509: {
+            const auto count = pop();
+            const auto pointer = pop();
+            const auto host = pop();
+            const auto bytes = byte_span(pointer, count);
+            stack.push_back(verify_system_x509_chain(
+                                text_value(text_heap, host), bytes)
+                                ? 1
+                                : 0);
             break;
         }
         case Op::print:

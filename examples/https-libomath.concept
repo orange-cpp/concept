@@ -1,59 +1,17 @@
-// Live HTTPS example for https://libomath.org/.
-//
-// These pins match the leaf certificate observed on 2026-07-22. That
-// certificate expires on 2026-09-06, so obtain and review new trusted pins
-// before updating them when the endpoint rotates its certificate or key.
+// Normal HTTPS using the operating system certificate store.
 
 import std::https;
 
-fn hex_digit(u8 value) -> u8 {
-    if (value >= u8(48)) {
-        if (value <= u8(57)) {
-            return value - u8(48);
-        }
-    }
-    return value - u8(87);
-}
-
-fn decode_hex(string value, u8* output) -> bool {
-    u64 count = string_length(value) / 2;
-    u64 index = 0;
-    while (index < count) {
-        output[index] = (hex_digit(string_byte(value, index * 2)) << 4) |
-            hex_digit(string_byte(value, index * 2 + 1));
-        index = index + 1;
-    }
-    return true;
-}
-
 fn main() -> int {
-    u8* certificate_pin = malloc(32);
-    u8* public_key = malloc(65);
-    decode_hex(
-        "1f3d49027a442a4c20c5910583e1334282e83031594bfcc6f76f06fac9559399",
-        certificate_pin);
-    decode_hex(
-        "04b2d2cd70a17bc0593ffe4ec821f30be98aa8b8a2878299f3a770240d7fdc11fe8e7348168cd6901649d3c75947cb5c07198ff3a37ac773d103d87faf3b35ed4a",
-        public_key);
-
     std::https request;
     request.host = "libomath.org";
     request.path = "/";
-    request.port = u16(443);
-    request.certificate_sha256 = certificate_pin;
-    request.certificate_sha256_length = 32;
-    request.ecdsa_public_key = public_key;
-    request.ecdsa_public_key_length = 65;
 
     if (!request.get()) {
         println(request.error);
-        free(public_key);
-        free(certificate_pin);
         return 1;
     }
 
     print(request.response);
-    free(public_key);
-    free(certificate_pin);
     return 42;
 }

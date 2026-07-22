@@ -10,6 +10,8 @@ set(forbidden_strings
     "Concept VM pointer is null or invalid"
     "executable has no Concept bytecode payload"
     "Concept VM encountered an invalid opcode"
+    "crypt32.dll"
+    "CertVerifyCertificateChainPolicy"
 )
 
 foreach(plaintext IN LISTS forbidden_strings)
