@@ -7,6 +7,9 @@ types, operators, pointers, classes, imports, and built-in APIs implemented now.
 
 The implementation uses C++23 and currently targets a small bootstrap language.
 
+<img width="991" height="466" alt="image" src="https://github.com/user-attachments/assets/06d3f610-2b56-410b-92f3-2388464b18d4" />
+
+
 ## Visual Studio Code
 
 The repository includes a VS Code language extension with `.concept` file
