@@ -33,7 +33,6 @@ class std::array<T> {
         this.capacity = next_capacity;
         return true;
     }
-
     fn push() -> bool {
         if (this.length == this.capacity) {
             if (!this.grow()) {

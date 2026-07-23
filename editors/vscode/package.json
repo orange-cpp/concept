@@ -1,0 +1,59 @@
+{
+  "name": "concept-language-support",
+  "displayName": "Concept Language Support",
+  "description": "Language support for the Concept programming language.",
+  "version": "0.1.1",
+  "publisher": "concept-language",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "concept",
+    "language",
+    "syntax",
+    "highlighting",
+    "snippets"
+  ],
+  "scripts": {
+    "test": "node scripts/validate.cjs && node scripts/tokenization-test.cjs",
+    "package:vsix": "node scripts/package-vsix.cjs"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "3.9.2",
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.3.2"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "concept",
+        "aliases": [
+          "Concept",
+          "concept"
+        ],
+        "extensions": [
+          ".concept"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "concept",
+        "scopeName": "source.concept",
+        "path": "./syntaxes/concept.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "concept",
+        "path": "./snippets/concept.json"
+      }
+    ]
+  }
+}

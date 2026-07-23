@@ -920,55 +920,68 @@ std::string receive_tcp_text(const NativeSocket handle) {
                : std::string(buffer.data(), static_cast<std::size_t>(received));
 }
 
-std::uint16_t read_u16(const std::vector<std::uint8_t>& code,
-                       std::size_t& ip) {
-    if (ip + 2 > code.size()) {
-        throw std::runtime_error(
-            xorstr_("VM read past the bytecode image"));
-    }
-    const auto value = static_cast<std::uint16_t>(
-        static_cast<std::uint16_t>(code[ip]) |
-        static_cast<std::uint16_t>(code[ip + 1] << 8));
-    ip += 2;
-    return value;
-}
+class OperandReader {
+public:
+    OperandReader(const std::vector<std::uint8_t>& code,
+                  const std::size_t opcode_offset,
+                  const std::uint32_t region_begin,
+                  const std::uint32_t region_end,
+                  const bool reversed)
+        : code_(code),
+          cursor_(static_cast<std::ptrdiff_t>(opcode_offset) +
+                  (reversed ? -1 : 1)),
+          begin_(region_begin),
+          end_(region_end),
+          step_(reversed ? -1 : 1) {}
 
-std::uint32_t read_u32(const std::vector<std::uint8_t>& code,
-                       std::size_t& ip) {
-    if (ip + 4 > code.size()) {
-        throw std::runtime_error(
-            xorstr_("VM read past the bytecode image"));
+    [[nodiscard]] std::uint8_t read_u8() {
+        if (cursor_ < begin_ || cursor_ >= end_) {
+            throw std::runtime_error(
+                xorstr_("VM operand read crossed its bytecode region"));
+        }
+        const auto value = code_[static_cast<std::size_t>(cursor_)];
+        cursor_ += step_;
+        return value;
     }
-    std::uint32_t value = 0;
-    for (unsigned index = 0; index < 4; ++index) {
-        value |= static_cast<std::uint32_t>(code[ip + index]) << (index * 8);
-    }
-    ip += 4;
-    return value;
-}
 
-std::uint64_t read_u64(const std::vector<std::uint8_t>& code,
-                       std::size_t& ip) {
-    if (ip + 8 > code.size()) {
-        throw std::runtime_error(
-            xorstr_("VM read past the bytecode image"));
+    [[nodiscard]] std::uint16_t read_u16() {
+        return static_cast<std::uint16_t>(
+            static_cast<std::uint16_t>(read_u8()) |
+            static_cast<std::uint16_t>(read_u8()) << 8);
     }
-    std::uint64_t bits = 0;
-    for (unsigned index = 0; index < 8; ++index) {
-        bits |= static_cast<std::uint64_t>(code[ip + index]) << (index * 8);
-    }
-    ip += 8;
-    return bits;
-}
 
-ValueType read_type(const std::vector<std::uint8_t>& code, std::size_t& ip) {
-    if (ip >= code.size() ||
-        code[ip] > static_cast<std::uint8_t>(ValueType::void_type)) {
-        throw std::runtime_error(
-            xorstr_("VM encountered an invalid value type"));
+    [[nodiscard]] std::uint32_t read_u32() {
+        std::uint32_t value = 0;
+        for (unsigned index = 0; index < 4; ++index) {
+            value |= static_cast<std::uint32_t>(read_u8()) << (index * 8);
+        }
+        return value;
     }
-    return static_cast<ValueType>(code[ip++]);
-}
+
+    [[nodiscard]] std::uint64_t read_u64() {
+        std::uint64_t value = 0;
+        for (unsigned index = 0; index < 8; ++index) {
+            value |= static_cast<std::uint64_t>(read_u8()) << (index * 8);
+        }
+        return value;
+    }
+
+    [[nodiscard]] ValueType read_type() {
+        const auto raw_type = read_u8();
+        if (raw_type > static_cast<std::uint8_t>(ValueType::void_type)) {
+            throw std::runtime_error(
+                xorstr_("VM encountered an invalid value type"));
+        }
+        return static_cast<ValueType>(raw_type);
+    }
+
+private:
+    const std::vector<std::uint8_t>& code_;
+    std::ptrdiff_t cursor_;
+    std::ptrdiff_t begin_;
+    std::ptrdiff_t end_;
+    std::ptrdiff_t step_;
+};
 
 unsigned integral_width(const ValueType type) {
     switch (type) {
@@ -1498,6 +1511,7 @@ std::int64_t execute(const Bytecode& bytecode) {
         std::uint32_t begin{};
         std::uint32_t end{};
         std::uint64_t opcode_seed{};
+        bool reversed{};
         std::span<const std::uint8_t> owned_code;
     };
 
@@ -1522,18 +1536,40 @@ std::int64_t execute(const Bytecode& bytecode) {
                               ? std::uint64_t{0}
                               : bytecode.vm_seeds.front();
         vm_contexts.push_back(
-            {0, static_cast<std::uint32_t>(bytecode.code.size()), seed,
+            {0, static_cast<std::uint32_t>(bytecode.code.size()), seed, false,
              bytecode.code});
     } else {
         vm_contexts.reserve(bytecode.vm_regions.size());
         for (const auto& region : bytecode.vm_regions) {
             vm_contexts.push_back(
                 {region.begin, region.end, region.opcode_seed,
+                 (region.opcode_seed & (std::uint64_t{1} << 63)) != 0,
                  std::span<const std::uint8_t>(bytecode.code)
                      .subspan(region.begin, region.end - region.begin)});
         }
     }
     std::size_t active_vm = 0;
+
+    const auto physical_address = [&](const std::size_t logical_offset) {
+        if (logical_offset == bytecode.code.size()) {
+            return logical_offset;
+        }
+        const auto context = std::find_if(
+            vm_contexts.begin(), vm_contexts.end(),
+            [&](const VmContext& candidate) {
+                return logical_offset >= candidate.begin &&
+                       logical_offset < candidate.end;
+            });
+        if (context == vm_contexts.end()) {
+            throw std::runtime_error(xorstr_(
+                "Concept logical instruction belongs to no VM context"));
+        }
+        return context->reversed
+                   ? static_cast<std::size_t>(context->begin) + context->end -
+                         1 - logical_offset
+                   : logical_offset;
+    };
+    ip = physical_address(bytecode.entry);
 
     const auto select_vm = [&]() -> const VmContext& {
         const auto contains_ip = [&](const VmContext& context) {
@@ -1868,6 +1904,25 @@ std::int64_t execute(const Bytecode& bytecode) {
         const auto instruction_offset = ip;
         const auto local_ip = ip - vm.begin;
         const auto op = static_cast<Op>(vm.owned_code[local_ip]);
+        const auto logical_instruction =
+            vm.reversed
+                ? static_cast<std::size_t>(vm.begin) + vm.end - 1 - ip
+                : ip;
+        const auto instruction_size = 1 + operand_size(op);
+        const auto next_logical_instruction =
+            logical_instruction + instruction_size;
+        if (next_logical_instruction > vm.end) {
+            throw std::runtime_error(
+                xorstr_("VM instruction crosses its bytecode region"));
+        }
+        OperandReader operands(bytecode.code, instruction_offset, vm.begin,
+                               vm.end, vm.reversed);
+        if (next_logical_instruction < vm.end) {
+            ip = vm.reversed ? instruction_offset - instruction_size
+                             : instruction_offset + instruction_size;
+        } else {
+            ip = physical_address(next_logical_instruction);
+        }
         std::uint8_t variant = 0;
         if (frames.back().complexity != 0) {
             variant = handler_variant(vm.opcode_seed, op);
@@ -1876,14 +1931,13 @@ std::int64_t execute(const Bytecode& bytecode) {
         }
         const bool reordered = (variant & 1) != 0;
         const bool substituted = (variant & 2) != 0;
-        ++ip;
 
         switch (op) {
         case Op::push_bits:
-            stack.push_back(read_u64(bytecode.code, ip));
+            stack.push_back(operands.read_u64());
             break;
         case Op::push_text: {
-            const auto index = read_u32(bytecode.code, ip);
+            const auto index = operands.read_u32();
             if (index >= bytecode.strings.size()) {
                 throw std::runtime_error(xorstr_(
                     "Concept VM string constant is out of range"));
@@ -1893,7 +1947,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::load: {
-            const auto index = read_u16(bytecode.code, ip);
+            const auto index = operands.read_u16();
             if (index >= frames.back().locals.size()) {
                 throw std::runtime_error(
                     xorstr_("Concept VM local load is out of range"));
@@ -1902,7 +1956,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::store: {
-            const auto index = read_u16(bytecode.code, ip);
+            const auto index = operands.read_u16();
             if (reordered) {
                 if (index >= frames.back().locals.size()) {
                     throw std::runtime_error(
@@ -1920,13 +1974,13 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::new_object: {
-            const auto field_count = read_u16(bytecode.code, ip);
+            const auto field_count = operands.read_u16();
             object_heap.emplace_back(field_count, 0);
             stack.push_back(object_heap.size());
             break;
         }
         case Op::load_field: {
-            const auto index = read_u16(bytecode.code, ip);
+            const auto index = operands.read_u16();
             const auto& fields = object_fields(pop());
             if (index >= fields.size()) {
                 throw std::runtime_error(xorstr_(
@@ -1936,7 +1990,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::store_field: {
-            const auto index = read_u16(bytecode.code, ip);
+            const auto index = operands.read_u16();
             const auto [object, value] = pop_binary(reordered);
             auto& fields = object_fields(object);
             if (index >= fields.size()) {
@@ -1947,7 +2001,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::address_local: {
-            const auto index = read_u16(bytecode.code, ip);
+            const auto index = operands.read_u16();
             if (index >= frames.back().locals.size()) {
                 throw std::runtime_error(
                     xorstr_("Concept VM local address is out of range"));
@@ -1958,7 +2012,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::address_field: {
-            const auto index = read_u16(bytecode.code, ip);
+            const auto index = operands.read_u16();
             const auto object = pop();
             auto& fields = object_fields(object);
             if (index >= fields.size()) {
@@ -1971,7 +2025,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::native_pointer: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto address = pop();
             if (address == 0) {
                 stack.push_back(0);
@@ -1983,8 +2037,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::array_alloc: {
-            const auto type = read_type(bytecode.code, ip);
-            const auto count = read_u32(bytecode.code, ip);
+            const auto type = operands.read_type();
+            const auto count = operands.read_u32();
             const auto element_size = heap_value_size(type);
             if (count >
                 std::numeric_limits<std::size_t>::max() / element_size) {
@@ -2004,7 +2058,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::heap_alloc: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto byte_count = pop();
             if (byte_count > std::numeric_limits<std::size_t>::max()) {
                 throw std::runtime_error(
@@ -2054,7 +2108,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::pointer_offset: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto [handle, offset_bits] = pop_binary(reordered);
             const auto adjusted =
                 offset_pointer_target(handle, offset_bits, type);
@@ -2090,7 +2144,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::load_indexed: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto offset = pop();
             const auto pointer = pop();
             const auto target =
@@ -2099,7 +2153,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::store_indexed: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto value = pop();
             const auto offset = pop();
             const auto pointer = pop();
@@ -2112,8 +2166,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             static_cast<void>(pop());
             break;
         case Op::convert: {
-            const auto source = read_type(bytecode.code, ip);
-            const auto target = read_type(bytecode.code, ip);
+            const auto source = operands.read_type();
+            const auto target = operands.read_type();
             stack.push_back(convert_value(pop(), source, target));
             break;
         }
@@ -2122,7 +2176,7 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::multiply:
         case Op::divide:
         case Op::modulo: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto [left, right] = pop_binary(reordered);
             stack.push_back(
                 arithmetic(op, type, left, right, substituted));
@@ -2133,19 +2187,19 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::bit_xor:
         case Op::shift_left:
         case Op::shift_right: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto [left, right] = pop_binary(reordered);
             stack.push_back(integral_arithmetic(op, type, left, right,
                                                 substituted));
             break;
         }
         case Op::bit_not: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             stack.push_back(normalize_integral(type, ~pop()));
             break;
         }
         case Op::negate: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto value = pop();
             stack.push_back(substituted && !is_floating(type)
                                 ? normalize_integral(
@@ -2155,7 +2209,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::logical_not: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto value = truthy(type, pop());
             stack.push_back(substituted
                                 ? static_cast<std::uint64_t>(!value)
@@ -2168,7 +2222,7 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::less_equal:
         case Op::greater:
         case Op::greater_equal: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             const auto [left, right] = pop_binary(reordered);
             if (type == ValueType::text) {
                 if (op != Op::equal && op != Op::not_equal) {
@@ -2190,28 +2244,28 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::jump:
-            ip = read_u32(bytecode.code, ip);
+            ip = physical_address(operands.read_u32());
             break;
         case Op::jump_if_false: {
             std::uint32_t target{};
             std::uint64_t condition{};
             if (reordered) {
                 condition = pop();
-                target = read_u32(bytecode.code, ip);
+                target = operands.read_u32();
             } else {
-                target = read_u32(bytecode.code, ip);
+                target = operands.read_u32();
                 condition = pop();
             }
             const bool should_jump = substituted ? !condition : condition == 0;
             if (should_jump) {
-                ip = target;
+                ip = physical_address(target);
             }
             break;
         }
         case Op::call: {
-            const auto target = read_u32(bytecode.code, ip);
-            const auto local_count = read_u32(bytecode.code, ip);
-            const auto argument_count = read_u16(bytecode.code, ip);
+            const auto target = operands.read_u32();
+            const auto local_count = operands.read_u32();
+            const auto argument_count = operands.read_u16();
             if (frames.size() >= maximum_call_depth) {
                 throw std::runtime_error(
                     xorstr_("Concept VM call stack overflow"));
@@ -2225,14 +2279,14 @@ std::int64_t execute(const Bytecode& bytecode) {
                                reordered);
             frames.push_back({next_frame_id++, ip, stack.size(),
                               std::move(function_locals)});
-            ip = target;
+            ip = physical_address(target);
             break;
         }
         case Op::call_method:
         case Op::call_constructor: {
-            const auto target = read_u32(bytecode.code, ip);
-            const auto local_count = read_u32(bytecode.code, ip);
-            const auto argument_count = read_u16(bytecode.code, ip);
+            const auto target = operands.read_u32();
+            const auto local_count = operands.read_u32();
+            const auto argument_count = operands.read_u16();
             if (frames.size() >= maximum_call_depth) {
                 throw std::runtime_error(
                     xorstr_("Concept VM call stack overflow"));
@@ -2249,7 +2303,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             frames.push_back({next_frame_id++, ip, stack.size(),
                               std::move(method_locals),
                               op == Op::call_constructor ? receiver : 0});
-            ip = target;
+            ip = physical_address(target);
             break;
         }
         case Op::input_text:
@@ -2321,7 +2375,7 @@ std::int64_t execute(const Bytecode& bytecode) {
         }
         case Op::print:
         case Op::println: {
-            const auto type = read_type(bytecode.code, ip);
+            const auto type = operands.read_type();
             print_value(type, pop(), text_heap, op == Op::println);
             stack.push_back(0);
             break;
@@ -2422,7 +2476,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             break;
         }
         case Op::set_complexity:
-            frames.back().complexity = bytecode.code[ip++];
+            frames.back().complexity = operands.read_u8();
             break;
         case Op::return_value: {
             const auto result = pop();

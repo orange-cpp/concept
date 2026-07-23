@@ -1,0 +1,257 @@
+{
+  "name": "Concept",
+  "scopeName": "source.concept",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#decorators"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#userTypes"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#functionCalls"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.concept",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.concept",
+          "begin": "\"",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.concept"
+            }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.concept"
+            }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.concept",
+              "match": "\\\\(?:[\\\\\"nrt0]|.)"
+            }
+          ]
+        }
+      ]
+    },
+    "decorators": {
+      "patterns": [
+        {
+          "match": "(@)(complexity|complexty)\\b",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.annotation.concept"
+            },
+            "2": {
+              "name": "entity.name.function.decorator.concept"
+            }
+          }
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(import)\\s+([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.import.concept"
+            },
+            "2": {
+              "name": "entity.name.namespace.concept"
+            }
+          }
+        },
+        {
+          "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)(?:\\s*(<)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(>))?",
+          "captures": {
+            "1": {
+              "name": "storage.type.class.concept"
+            },
+            "2": {
+              "name": "entity.name.type.class.concept"
+            },
+            "3": {
+              "name": "punctuation.definition.typeparameters.begin.concept"
+            },
+            "4": {
+              "name": "entity.name.type.parameter.concept"
+            },
+            "5": {
+              "name": "punctuation.definition.typeparameters.end.concept"
+            }
+          }
+        },
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.concept"
+            },
+            "2": {
+              "name": "entity.name.function.concept"
+            }
+          }
+        },
+        {
+          "name": "entity.name.function.constructor.concept",
+          "match": "\\bconstructor\\b"
+        },
+        {
+          "name": "entity.name.type.generic.concept",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*(?=\\s*<)"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.concept",
+          "match": "\\b(?:return|if|else|while)\\b"
+        },
+        {
+          "name": "storage.type.declaration.concept",
+          "match": "\\b(?:import|class|constructor|fn)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.concept",
+          "match": "\\b(?:bool|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|int|float|double|string|text|void)\\b"
+        }
+      ]
+    },
+    "userTypes": {
+      "patterns": [
+        {
+          "name": "entity.name.type.concept",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.concept",
+          "match": "\\b(?:true|false)\\b"
+        },
+        {
+          "name": "variable.language.this.concept",
+          "match": "\\bthis\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.concept",
+          "match": "\\b(?:input|input_text|input_i64|input_f64|print|println|malloc|free|entropy_fill|string_length|string_byte|string_from_bytes|system_verify_x509|ptr_cast|__win_api_call)(?=\\s*(?:<[^>]+>\\s*)?\\()"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.concept",
+          "match": "\\b0[xX][0-9A-Fa-f]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.concept",
+          "match": "\\b(?:[0-9]+\\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)\\b"
+        },
+        {
+          "name": "constant.numeric.integer.concept",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "functionCalls": {
+      "patterns": [
+        {
+          "name": "support.function.call.concept",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*(?=\\s*\\()"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.concept",
+          "match": "->|==|!=|<=|>=|<<|>>|[=+\\-*/%&|^~!<>]"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.accessor.namespace.concept",
+          "match": "::"
+        },
+        {
+          "name": "punctuation.accessor.dot.concept",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.terminator.statement.concept",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.comma.concept",
+          "match": ","
+        },
+        {
+          "name": "punctuation.section.group.begin.concept",
+          "match": "(?:\\(|\\{|\\[)"
+        },
+        {
+          "name": "punctuation.section.group.end.concept",
+          "match": "(?:\\)|\\}|\\])"
+        }
+      ]
+    }
+  }
+}

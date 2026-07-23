@@ -61,6 +61,40 @@ jobs:
         with:
           ref: ${{ steps.release.outputs.commit }}
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install VS Code extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: Test VS Code extension
+        working-directory: editors/vscode
+        run: npm test
+
+      - name: Package VS Code extension
+        id: vscode_extension
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm run package:vsix --prefix editors/vscode
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to package the VS Code extension.'
+          }
+
+          $manifest = Get-Content -LiteralPath `
+            'editors\vscode\package.json' -Raw | ConvertFrom-Json
+          $vsix = Join-Path $PWD `
+            "dist\concept-language-support-$($manifest.version).vsix"
+          if (-not (Test-Path -LiteralPath $vsix -PathType Leaf)) {
+              throw "Packaged VS Code extension is missing: $vsix"
+          }
+          "vsix_path=$vsix" >> $env:GITHUB_OUTPUT
+
       - name: Configure MSVC Release
         run: cmake -S . -B build-release -A x64 -DBUILD_TESTING=ON
 
@@ -116,15 +150,17 @@ jobs:
             -CompressionLevel Optimal -Force
           "archive_path=$archive" >> $env:GITHUB_OUTPUT
 
-      - name: Attach archive to release
+      - name: Attach release assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+          VSIX_PATH: ${{ steps.vscode_extension.outputs.vsix_path }}
         run: |
-          gh release upload $env:RELEASE_TAG $env:ARCHIVE_PATH --clobber `
+          gh release upload $env:RELEASE_TAG `
+            $env:ARCHIVE_PATH $env:VSIX_PATH --clobber `
             --repo $env:GITHUB_REPOSITORY
           if ($LASTEXITCODE -ne 0) {
-              throw "Failed to upload '$env:ARCHIVE_PATH'."
+              throw 'Failed to upload release assets.'
           }

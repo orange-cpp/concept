@@ -1,7 +1,8 @@
 #pragma once
 
-#include <cstdint>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 #include <vector>
@@ -128,6 +129,7 @@ struct Bytecode {
     std::vector<std::string> strings;
 };
 
+[[nodiscard]] std::size_t operand_size(Op op);
 [[nodiscard]] std::vector<std::uint8_t> serialize(const Bytecode& bytecode);
 [[nodiscard]] Bytecode deserialize(std::span<const std::uint8_t> bytes);
 void validate(const Bytecode& bytecode);

@@ -479,10 +479,13 @@ Serialized bytecode also encodes every opcode and operand with per-VM rolling
 keys. Each VM seed independently chooses whether its physical region is stored
 forward or byte-reversed before rolling encoding. A ciphertext byte changes the
 key state used for the next byte, and the runtime verifies a checksum before
-reversing the transform, direction, and randomized opcode mapping. This encoding
-is automatic at every complexity level. Its key material is stored in
-recoverable form in the packaged program, so it hides static plaintext patterns
-but is not secret-key protection.
+reversing the rolling transform and randomized opcode mapping. It does not
+restore reversed regions to forward order: their VM starts at the mirrored
+opcode, reads operands toward lower addresses, and advances backward. Logical
+branch and call offsets are translated to the target region's physical
+direction. This encoding is automatic at every complexity level. Its key
+material is stored in recoverable form in the packaged program, so it hides
+static plaintext patterns but is not secret-key protection.
 
 ## Built-in input and output
 

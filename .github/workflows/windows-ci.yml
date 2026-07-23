@@ -21,6 +21,25 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v7
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install VS Code extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: Test VS Code extension
+        working-directory: editors/vscode
+        run: npm test
+
+      - name: Package VS Code extension
+        working-directory: editors/vscode
+        run: npm run package:vsix
+
       - name: Configure MSVC Release
         run: cmake -S . -B build-ci -A x64 -DBUILD_TESTING=ON
 

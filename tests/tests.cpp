@@ -112,9 +112,10 @@ void randomized_opcode_test() {
 
 void encoded_bytecode_test() {
     constexpr std::uint64_t literal = 0x1122334455667788ULL;
-    const auto compiled = cpt::compile(R"(
+    auto compiled = cpt::compile(R"(
         fn main() -> i64 { return 1234605616436508552; }
     )", "encoded-bytecode.concept", 1);
+    compiled.vm_seeds.assign(1, 0x123456789abcdef0ULL);
     const auto image = cpt::serialize(compiled);
 
     const auto read_u32 = [&](const std::size_t offset) {
@@ -158,20 +159,22 @@ void encoded_bytecode_test() {
 
     const auto loaded = cpt::deserialize(image);
     expect(loaded.code == compiled.code,
-           "rolling-key decoding should restore canonical bytecode");
+           "rolling-key decoding should preserve forward bytecode");
     expect(cpt::execute(loaded) == static_cast<std::int64_t>(literal),
            "rolling-key decoded operands should execute unchanged");
 }
 
 void bytecode_direction_test() {
-    auto compiled = cpt::compile(R"(
+    constexpr std::string_view source = R"(
         fn adjust(i64 value) -> i64 { return value + 2; }
         fn main() -> i64 {
             i64 value = adjust(40);
             if (value == 42) { return value; }
             return 0;
         }
-    )", "bytecode-direction.concept", 1);
+    )";
+    auto compiled =
+        cpt::compile(source, "bytecode-direction.concept", 1);
 
     compiled.vm_seeds.assign(1, 0x123456789abcdef0ULL);
     const auto forward_image = cpt::serialize(compiled);
@@ -187,10 +190,38 @@ void bytecode_direction_test() {
            "VM seed direction bit should select forward and reversed regions");
     expect(forward_image != reversed_image,
            "opposite bytecode directions should produce different images");
-    expect(forward.code == compiled.code && reversed.code == compiled.code,
-           "both bytecode directions should restore canonical code");
+    expect(forward.code == compiled.code && reversed.code != compiled.code,
+           "reversed VM regions should remain physically reversed");
+    auto restored = reversed.code;
+    for (const auto& region : reversed.vm_regions) {
+        if ((region.opcode_seed >> 63) != 0) {
+            std::reverse(
+                restored.begin() + static_cast<std::ptrdiff_t>(region.begin),
+                restored.begin() + static_cast<std::ptrdiff_t>(region.end));
+        }
+    }
+    expect(restored == compiled.code,
+           "reversing physical VM regions should recover logical bytecode");
+    const auto& reversed_region = reversed.vm_regions.front();
+    const auto physical_entry =
+        static_cast<std::size_t>(reversed_region.begin) +
+        reversed_region.end - 1 - reversed.entry;
+    expect(reversed.code[physical_entry] == compiled.code[compiled.entry],
+           "reversed execution should begin at the region's mirrored opcode");
     expect(cpt::execute(forward) == 42 && cpt::execute(reversed) == 42,
            "forward and reversed bytecode regions should execute equally");
+
+    auto mixed = cpt::compile(source, "mixed-direction.concept", 8);
+    mixed.vm_seeds = {
+        0x0101010101010101ULL, 0x8202020202020202ULL,
+        0x0303030303030303ULL, 0x8404040404040404ULL,
+        0x0505050505050505ULL, 0x8606060606060606ULL,
+        0x0707070707070707ULL, 0x8808080808080808ULL,
+    };
+    const auto mixed_loaded = cpt::deserialize(cpt::serialize(mixed));
+    expect(mixed_loaded.vm_regions.size() == 8 &&
+               cpt::execute(mixed_loaded) == 42,
+           "control flow should cross eight alternating forward and reversed VMs");
 }
 
 void handler_mutation_test() {

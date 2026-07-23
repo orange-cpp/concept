@@ -7,6 +7,21 @@ types, operators, pointers, classes, imports, and built-in APIs implemented now.
 
 The implementation uses C++23 and currently targets a small bootstrap language.
 
+## Visual Studio Code
+
+The repository includes a VS Code language extension with `.concept` file
+recognition, syntax highlighting, comment and bracket behavior, indentation,
+folding, and snippets.
+
+Install the packaged extension:
+
+```powershell
+code --install-extension .\dist\concept-language-support-0.1.1.vsix --force
+```
+
+Extension sources and development instructions are in
+[`editors/vscode`](editors/vscode/README.md).
+
 ## Build
 
 With Visual Studio 2022 or another C++23 compiler:
@@ -24,14 +39,17 @@ runtime string obfuscation.
 
 ## GitHub Actions
 
-`Windows CI` builds the x64 MSVC Release configuration and runs the complete
-CTest suite for every push, pull request, and manual run.
+`Windows CI` validates and packages the VS Code extension, builds the x64 MSVC
+Release configuration, and runs the complete CTest suite for every push, pull
+request, and manual run.
 
 `Windows release` builds and tests a release commit, stages a self-contained
-Windows x64 distribution, and attaches a versioned ZIP to the matching GitHub
-release. The archive contains `concept.exe`, both runtime binaries, the
+Windows x64 distribution, builds the VS Code extension, and attaches both the
+versioned compiler ZIP and installable `.vsix` to the matching GitHub release.
+The compiler archive contains `concept.exe`, both runtime binaries, the
 `concept/std` library sources, the syntax reference, README, and third-party
-notices.
+notices. The VSIX version and filename come from
+`editors/vscode/package.json`.
 
 [GitHub does not trigger release workflows for draft-release creation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release).
 To attach the archive while the release is still a draft:
@@ -40,10 +58,11 @@ To attach the archive while the release is still a draft:
 2. Open **Actions**, select **Windows release**, and choose **Run workflow**.
 3. Enter the draft's exact release tag in `release_tag`.
 
-Publishing a release also runs this workflow automatically and replaces an
-existing archive with a freshly tested build. No additional repository secret
-is required; the workflow grants the built-in `GITHUB_TOKEN` only the repository
-contents permission needed to upload the asset.
+Publishing a release also runs this workflow automatically and replaces
+existing compiler and extension assets with freshly tested builds. No
+additional repository secret is required; the workflow grants the built-in
+`GITHUB_TOKEN` only the repository contents permission needed to upload the
+assets.
 
 ## Compile a Concept program
 
@@ -283,9 +302,11 @@ requested count, only the number of non-empty regions that can be formed is
 used.
 
 The contexts execute cooperatively in one native thread. Before each
-instruction, the dispatcher selects the context that owns the current
-instruction pointer, so a branch or call into another region continues under
-that region's opcode layout and handler mutations. These are VM contexts, not
+instruction, the dispatcher selects the context that owns the physical
+instruction pointer. Branch and call operands use stable logical offsets, which
+the dispatcher maps to the owning context's forward or backward physical
+address. A transfer into another region therefore continues under that region's
+opcode layout, direction, and handler mutations. These are VM contexts, not
 parallel OS threads. They deliberately share the operand stack, call frames and
 locals, string and object heaps, pointer table, and allocated heap blocks, so
 state written in one context is immediately visible after a context switch.
@@ -295,7 +316,7 @@ state written in one context is immediately visible after a context switch.
 | Feature | VM behavior | Boundary |
 | --- | --- | --- |
 | Random opcode numbers | Every region seed builds a different one-to-one mapping from canonical instructions to byte values selected from the full `0..255` range. The runtime reconstructs the inverse mapping before dispatch. | The mapping and seed are recoverable from the image and runtime. |
-| Random region direction | A seed bit selects whether the complete physical opcode-and-operand byte sequence for that region is stored forward or reversed. The runtime restores the direction before decoding opcodes. | This changes storage layout, not Concept control-flow semantics. |
+| Random region direction | A seed bit selects whether the complete physical opcode-and-operand byte sequence for that region is forward or reversed. Reversed regions stay reversed after loading: the VM begins at the mirrored opcode, reads operands toward lower addresses, and dispatches the next instruction backward. | Logical branch addresses are mapped to physical addresses at runtime, so direction changes execution layout without changing Concept semantics. |
 | Rolling bytecode encoding | After opcode mapping and direction selection, every opcode and operand byte is transformed with a per-region rolling state derived from the image key, nonce, region boundaries, and VM seed. Each ciphertext byte feeds the next state. | Required decoding material ships with the executable. |
 | Encoded-code checksum | The loader verifies the stored encoded stream before attempting to decode it. | This detects accidental damage or simple tampering; it is not authentication against an attacker who can rewrite the executable. |
 | Handler mutation | For functions above complexity `0`, every VM seed and opcode select one of four precompiled native handler shapes. The shapes reorder safe operand extraction or argument transfer, use equivalent integral arithmetic and mirrored comparisons, and perform different side-effect-free junk calculations. Complexity `0` bypasses this work. | All shapes remain in the native VM; this is runtime path variation, not generated native machine-code mutation. |

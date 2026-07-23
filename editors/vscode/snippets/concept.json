@@ -1,0 +1,143 @@
+{
+  "Import module": {
+    "prefix": "import",
+    "body": [
+      "import ${1|std::array,std::bytes,std::crypto,std::ecdsa,std::http,std::https,std::rsa,std::socket,std::win_api|};"
+    ],
+    "description": "Import a Concept module"
+  },
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2}) -> ${3:int} {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Declare a Concept function"
+  },
+  "Main function": {
+    "prefix": "main",
+    "body": [
+      "fn main() -> int {",
+      "\t${0}",
+      "\treturn 0;",
+      "}"
+    ],
+    "description": "Declare an executable entry point"
+  },
+  "DLL main function": {
+    "prefix": "dllmain",
+    "body": [
+      "fn dll_main() -> bool {",
+      "\t${0}",
+      "\treturn true;",
+      "}"
+    ],
+    "description": "Declare a shared-module entry point"
+  },
+  "Class": {
+    "prefix": "class",
+    "body": [
+      "class ${1:Name} {",
+      "\t${2:i32} ${3:value};",
+      "",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Declare a Concept class"
+  },
+  "Generic class": {
+    "prefix": "classgeneric",
+    "body": [
+      "class ${1:Box}<${2:T}> {",
+      "\t${2:T} ${3:value};",
+      "",
+      "\tconstructor(${2:T} initial) {",
+      "\t\tthis.${3:value} = initial;",
+      "\t}",
+      "",
+      "\tfn get() -> ${2:T} {",
+      "\t\treturn this.${3:value};",
+      "\t}",
+      "}"
+    ],
+    "description": "Declare a single-parameter generic class"
+  },
+  "Constructor": {
+    "prefix": "ctor",
+    "body": [
+      "constructor(${1}) {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Declare a class constructor"
+  },
+  "Method": {
+    "prefix": "method",
+    "body": [
+      "fn ${1:name}(${2}) -> ${3:int} {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Declare a class method"
+  },
+  "Complexity decorator": {
+    "prefix": "complexity",
+    "body": [
+      "@complexity(${1:25})"
+    ],
+    "description": "Set function bytecode-obfuscation complexity from 0 to 100"
+  },
+  "If statement": {
+    "prefix": "if",
+    "body": [
+      "if (${1:condition}) {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Insert an if statement"
+  },
+  "If/else statement": {
+    "prefix": "ifelse",
+    "body": [
+      "if (${1:condition}) {",
+      "\t${2}",
+      "} else {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Insert an if/else statement"
+  },
+  "While loop": {
+    "prefix": "while",
+    "body": [
+      "while (${1:condition}) {",
+      "\t${0}",
+      "}"
+    ],
+    "description": "Insert a while loop"
+  },
+  "Fixed array": {
+    "prefix": "array",
+    "body": [
+      "${1:i32} ${2:values}[${3:4}];"
+    ],
+    "description": "Declare a fixed-size local array"
+  },
+  "Heap allocation": {
+    "prefix": "malloc",
+    "body": [
+      "${1:u8}* ${2:memory} = malloc(${3:count});",
+      "${0}",
+      "free(${2:memory});"
+    ],
+    "description": "Allocate and release VM heap memory"
+  },
+  "Native pointer cast": {
+    "prefix": "ptrcast",
+    "body": [
+      "${1:u32}* ${2:pointer} = ptr_cast<${1:u32}>(${3:address});"
+    ],
+    "description": "Cast an integral native address to a typed pointer"
+  }
+}
