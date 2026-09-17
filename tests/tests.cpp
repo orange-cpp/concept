@@ -10,7 +10,9 @@
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -348,6 +350,522 @@ void complexity_decorator_test() {
     expect(cpt::execute(cpt::deserialize(cpt::serialize(medium))) == 42 &&
                cpt::execute(cpt::deserialize(cpt::serialize(full))) == 42,
            "obfuscated bytecode should preserve behavior across eight VMs");
+}
+
+// Compiles `source`, forces a deterministic set of VM seeds derived from `seed`
+// (so region opcode maps, directions, and handler variants vary), then runs it
+// through the full serialize/deserialize path the packaged runtime uses.
+std::int64_t run_seeded(const std::string_view source,
+                        const std::uint32_t vm_count,
+                        const std::uint64_t seed) {
+    auto compiled = cpt::compile(source, "obf-test.concept", vm_count);
+    std::vector<std::uint64_t> seeds(vm_count);
+    for (std::uint32_t index = 0; index < vm_count; ++index) {
+        seeds[index] = (seed + index) * 0x9e3779b97f4a7c15ULL +
+                       0xd1b54a32d192ed03ULL;
+    }
+    compiled.vm_seeds = std::move(seeds);
+    return cpt::execute(cpt::deserialize(cpt::serialize(compiled)));
+}
+
+// Counts occurrences of a canonical opcode by walking the instruction stream.
+std::size_t count_opcode(const std::vector<std::uint8_t>& code,
+                         const cpt::Op target) {
+    std::size_t count = 0;
+    std::size_t offset = 0;
+    while (offset < code.size()) {
+        const auto op = static_cast<cpt::Op>(code[offset]);
+        if (op == target) {
+            ++count;
+        }
+        offset += 1 + cpt::operand_size(op);
+    }
+    return count;
+}
+
+// MBA rewriting and nested virtualization must preserve exact results for every
+// integer op across signs, widths, wraparound, and high-bit operands. The body
+// is compiled once without obfuscation (the ground truth) and once at maximum
+// complexity, then executed across many seeds; every seed must agree.
+void mba_nested_equivalence_test() {
+    constexpr std::string_view body = R"(
+        fn compute() -> i64 {
+            u64 a = u64(12297829382473034410);
+            u64 b = u64(1311768467463790320);
+            u64 s = u64(1);
+            u64 i = u64(0);
+            while (i < u64(48)) {
+                s = s + (a ^ b);
+                s = s - (a & b);
+                s = s + (a | b);
+                s = s * u64(3);
+                s = s ^ (a + b);
+                s = s + (a - b);
+                s = s & u64(281474976710655);
+                s = s | (i << u64(3));
+                s = s + i64(-7);
+                a = a + u64(1);
+                b = b - u64(2);
+                i = i + u64(1);
+            }
+            return i64(s);
+        }
+        fn main() -> i64 { return compute(); }
+    )";
+    const std::string plain(body);
+    const std::string obfuscated = "@complexity(100)\n" + std::string(body);
+
+    const auto expected = run_seeded(plain, 4, 1);
+    bool equivalent = true;
+    for (std::uint64_t seed = 0; seed < 40; ++seed) {
+        if (run_seeded(obfuscated, 4, seed) != expected) {
+            equivalent = false;
+            break;
+        }
+    }
+    expect(equivalent,
+           "MBA and nested-virtualized integer ops should match the "
+           "unobfuscated result across seeds");
+    // The plain build should also be seed-independent.
+    expect(run_seeded(plain, 4, 99) == expected &&
+               run_seeded(plain, 8, 7) == expected,
+           "unobfuscated arithmetic should be stable across seeds and VM counts");
+}
+
+// The push_bits immediate obfuscation must keep literals masked in the decoded
+// in-memory bytecode, recover them exactly, and leave execute() correct on both
+// freshly compiled (unmasked) and deserialized (masked) code.
+void immediate_masking_test() {
+    constexpr std::uint64_t literal = 0x0123456789abcdefULL;
+    auto compiled = cpt::compile(R"(
+        fn main() -> i64 { return 81985529216486895; }
+    )", "immediate-mask.concept", 1);
+    // Force a forward (non-reversed) region so the decoded bytecode stays in
+    // canonical order for without_immediate_mask below.
+    compiled.vm_seeds.assign(1, 0x123456789abcdef0ULL);
+
+    expect(!compiled.immediates_masked,
+           "freshly compiled bytecode should not be flagged as masked");
+
+    std::array<std::uint8_t, 8> operand{};
+    for (unsigned byte = 0; byte < operand.size(); ++byte) {
+        operand[byte] = static_cast<std::uint8_t>(literal >> (byte * 8));
+    }
+    const auto in_plain = std::search(compiled.code.begin(), compiled.code.end(),
+                                      operand.begin(), operand.end()) !=
+                          compiled.code.end();
+    expect(in_plain, "the literal should appear in the canonical bytecode");
+
+    const auto loaded = cpt::deserialize(cpt::serialize(compiled));
+    expect(loaded.immediates_masked,
+           "deserialized bytecode should be flagged as masked");
+    const auto in_masked = std::search(loaded.code.begin(), loaded.code.end(),
+                                       operand.begin(), operand.end()) !=
+                           loaded.code.end();
+    expect(!in_masked,
+           "the literal should not appear in the masked in-memory bytecode");
+    expect(without_immediate_mask(loaded.code, loaded.vm_regions) ==
+               compiled.code,
+           "unmasking should recover the canonical bytecode exactly");
+    expect(cpt::execute(compiled) == static_cast<std::int64_t>(literal) &&
+               cpt::execute(loaded) == static_cast<std::int64_t>(literal),
+           "execute() should be correct on both unmasked and masked bytecode");
+}
+
+// Opaque predicates and bogus flow must add unreachable branches without
+// changing behavior, and the always-true predicate must never divert control
+// into the dead block regardless of seed.
+void opaque_predicate_flow_test() {
+    constexpr std::string_view body = R"(
+        fn classify(i64 n) -> i64 {
+            i64 total = i64(0);
+            i64 i = i64(0);
+            while (i < n) {
+                if (i % i64(3) == i64(0)) {
+                    total = total + i;
+                } else {
+                    total = total - i64(1);
+                }
+                i = i + i64(1);
+            }
+            if (total > i64(0)) { return total; }
+            return i64(0) - total;
+        }
+        fn main() -> i64 { return classify(i64(30)); }
+    )";
+    const std::string plain(body);
+    const std::string obfuscated = "@complexity(100)\n" + std::string(body);
+
+    const auto plain_code = cpt::compile(plain, "flow.concept", 1).code;
+    const auto obf_code = cpt::compile(obfuscated, "flow.concept", 1).code;
+    expect(count_opcode(obf_code, cpt::Op::jump_if_false) >
+                   count_opcode(plain_code, cpt::Op::jump_if_false) &&
+               count_opcode(obf_code, cpt::Op::jump) >
+                   count_opcode(plain_code, cpt::Op::jump),
+           "opaque predicates and bogus flow should add branch instructions");
+
+    const auto expected = run_seeded(plain, 4, 3);
+    bool equivalent = expected != 0;
+    for (std::uint64_t seed = 0; seed < 40 && equivalent; ++seed) {
+        equivalent = run_seeded(obfuscated, 4, seed) == expected;
+    }
+    expect(equivalent,
+           "opaque predicates should never divert control flow into dead code");
+}
+
+// Frame locals are masked in memory and pinned when their address is taken.
+// Recursion (many frames), direct local access, and pointer writes must all
+// resolve to the same result as the unobfuscated program across seeds.
+void masked_locals_pointer_test() {
+    constexpr std::string_view body = R"(
+        fn descend(i64 depth, i64 acc) -> i64 {
+            i64 scratch = depth * i64(7);
+            i64* pointer = &scratch;
+            *pointer = *pointer + acc;
+            i64 combined = scratch - depth;
+            if (depth <= i64(0)) { return combined; }
+            return descend(depth - i64(1), combined);
+        }
+        fn compute() -> i64 {
+            i64 x = i64(9);
+            i64 y = i64(4);
+            i64* px = &x;
+            i64* py = &y;
+            *px = *px + *py;
+            *py = *px - *py;
+            return descend(x, y) + x + y;
+        }
+        fn main() -> i64 { return compute(); }
+    )";
+    const std::string plain(body);
+    const std::string obfuscated = "@complexity(100)\n" + std::string(body);
+
+    const auto expected = run_seeded(plain, 4, 5);
+    bool equivalent = true;
+    for (std::uint64_t seed = 0; seed < 40; ++seed) {
+        if (run_seeded(obfuscated, 4, seed) != expected) {
+            equivalent = false;
+            break;
+        }
+    }
+    expect(equivalent,
+           "masked locals and address-of pinning should preserve behavior "
+           "through recursion across seeds");
+}
+
+// Floating-point values are never MBA/nested rewritten, but they still travel
+// through the masked operand stack and masked locals and are stored as push_bits
+// immediates. Their exact bit patterns must survive every layer.
+void obfuscated_float_test() {
+    constexpr std::string_view body = R"(
+        fn compute() -> i64 {
+            f64 acc = 1000.0;
+            f32 s = f32(2.5);
+            i64 i = i64(0);
+            while (i < i64(40)) {
+                acc = acc + 7.5;
+                acc = acc - 3.25;
+                acc = acc + f64(s);
+                acc = acc / 1.02;
+                s = s + f32(0.25);
+                if (s > f32(500.0)) { s = f32(2.5); }
+                i = i + i64(1);
+            }
+            if (acc < 0.0) { acc = 0.0 - acc; }
+            return i64(acc) + i64(f32(3.5) * f32(4.0));
+        }
+        fn main() -> i64 { return compute(); }
+    )";
+    const std::string plain(body);
+    const std::string obfuscated = "@complexity(100)\n" + std::string(body);
+    const auto expected = run_seeded(plain, 4, 2);
+    bool equivalent = true;
+    for (std::uint64_t seed = 0; seed < 40; ++seed) {
+        if (run_seeded(obfuscated, 4, seed) != expected) {
+            equivalent = false;
+            break;
+        }
+    }
+    expect(equivalent,
+           "floating-point arithmetic should be bit-exact through masked "
+           "storage and immediate obfuscation");
+}
+
+// String handles are tagged constants that flow through the masked stack, are
+// held in masked locals, and are returned across frames. Length, byte access,
+// and equality must all still work under obfuscation.
+void obfuscated_string_test() {
+    constexpr std::string_view body = R"(
+        fn pick(i64 which) -> string {
+            if (which == i64(0)) { return "alpha"; }
+            if (which == i64(1)) { return "beta"; }
+            return "gamma-longer-literal";
+        }
+        fn compute() -> i64 {
+            i64 total = i64(0);
+            i64 i = i64(0);
+            while (i < i64(9)) {
+                string s = pick(i % i64(3));
+                total = total + i64(string_length(s));
+                if (s == "beta") { total = total + i64(100); }
+                total = total + i64(string_byte(s, u64(0)));
+                i = i + i64(1);
+            }
+            return total;
+        }
+        fn main() -> i64 { return compute(); }
+    )";
+    const std::string plain(body);
+    const std::string obfuscated = "@complexity(100)\n" + std::string(body);
+    const auto expected = run_seeded(plain, 4, 4);
+    bool equivalent = expected > 0;
+    for (std::uint64_t seed = 0; seed < 40 && equivalent; ++seed) {
+        equivalent = run_seeded(obfuscated, 4, seed) == expected;
+    }
+    expect(equivalent,
+           "tagged string handles should survive masked storage and cross-frame "
+           "returns under obfuscation");
+}
+
+// Negation, bitwise-not, logical-not, and every comparison have substituted
+// handler variants under obfuscation; exercise them across signed operands.
+void obfuscated_unary_compare_test() {
+    constexpr std::string_view body = R"(
+        fn compute() -> i64 {
+            i64 acc = i64(0);
+            i64 i = i64(-20);
+            while (i < i64(20)) {
+                i64 n = -i;
+                i64 m = ~i;
+                bool positive = i > i64(0);
+                bool nonneg = i >= i64(0);
+                bool small = i < i64(5);
+                bool ne = i != i64(3);
+                bool le = i <= i64(10);
+                bool eq = i == i64(7);
+                if (positive) { acc = acc + n; }
+                if (!small) { acc = acc + i64(1); }
+                if (nonneg) { acc = acc + m; }
+                if (ne) { acc = acc - i64(2); }
+                if (le) { acc = acc + i64(3); }
+                if (eq) { acc = acc + i64(1000); }
+                i = i + i64(1);
+            }
+            return acc;
+        }
+        fn main() -> i64 { return compute(); }
+    )";
+    const std::string plain(body);
+    const std::string obfuscated = "@complexity(100)\n" + std::string(body);
+    const auto expected = run_seeded(plain, 4, 6);
+    bool equivalent = true;
+    for (std::uint64_t seed = 0; seed < 40; ++seed) {
+        if (run_seeded(obfuscated, 4, seed) != expected) {
+            equivalent = false;
+            break;
+        }
+    }
+    expect(equivalent,
+           "substituted unary and comparison handlers should be equivalent "
+           "across seeds");
+}
+
+// A pointer to a caller's local, passed into a callee, resolves the owner frame
+// while that local is masked and pinned. Exercise it repeatedly across frames.
+void cross_frame_pointer_test() {
+    constexpr std::string_view body = R"(
+        fn bump(i64* p, i64 delta) -> i64 {
+            *p = *p + delta;
+            return *p;
+        }
+        fn accumulate(i64* sink, i64 rounds) -> i64 {
+            i64 local = i64(3);
+            i64 i = i64(0);
+            while (i < rounds) {
+                i64 seen = bump(sink, i);
+                local = local + bump(&local, seen);
+                i = i + i64(1);
+            }
+            return local;
+        }
+        fn compute() -> i64 {
+            i64 value = i64(10);
+            i64 tally = accumulate(&value, i64(6));
+            return tally + value;
+        }
+        fn main() -> i64 { return compute(); }
+    )";
+    const std::string plain(body);
+    const std::string obfuscated = "@complexity(100)\n" + std::string(body);
+    const auto expected = run_seeded(plain, 4, 8);
+    bool equivalent = true;
+    for (std::uint64_t seed = 0; seed < 40; ++seed) {
+        if (run_seeded(obfuscated, 4, seed) != expected) {
+            equivalent = false;
+            break;
+        }
+    }
+    expect(equivalent,
+           "cross-frame pointers to masked, pinned locals should resolve "
+           "correctly under obfuscation");
+}
+
+// Conversions between widths, signedness, and floating types run through the
+// convert handler and masked storage.
+void obfuscated_conversion_test() {
+    constexpr std::string_view body = R"(
+        fn compute() -> i64 {
+            i64 acc = i64(0);
+            u8 a = u8(200);
+            i8 b = i8(-50);
+            u16 c = u16(a);
+            i32 d = i32(a);
+            u32 e = u32(c) + u32(d);
+            f64 f = f64(e);
+            i64 g = i64(f / 8.0);
+            f32 h = f32(g);
+            u16 k = u16(g);
+            acc = acc + i64(a) + i64(b) + i64(c) + i64(d);
+            acc = acc + i64(e) + g + i64(h) + i64(k);
+            bool flag = a;
+            if (flag) { acc = acc + i64(1); }
+            return acc;
+        }
+        fn main() -> i64 { return compute(); }
+    )";
+    const std::string plain(body);
+    const std::string obfuscated = "@complexity(100)\n" + std::string(body);
+    const auto expected = run_seeded(plain, 4, 10);
+    bool equivalent = true;
+    for (std::uint64_t seed = 0; seed < 40; ++seed) {
+        if (run_seeded(obfuscated, 4, seed) != expected) {
+            equivalent = false;
+            break;
+        }
+    }
+    expect(equivalent,
+           "type conversions should be preserved under obfuscation across "
+           "seeds");
+}
+
+// Immediate masking is keyed by the instruction's logical offset, so a literal
+// must decode correctly whether its region runs forward or physically reversed.
+void reversed_region_immediate_test() {
+    constexpr std::int64_t literal = 0x0123456789abcdefLL;
+    auto compiled = cpt::compile(R"(
+        fn main() -> i64 { return 81985529216486895; }
+    )", "reversed-immediate.concept", 1);
+
+    compiled.vm_seeds.assign(1, 0x123456789abcdef0ULL); // high bit clear: forward
+    const auto forward = cpt::deserialize(cpt::serialize(compiled));
+    compiled.vm_seeds.assign(1, 0x923456789abcdef0ULL); // high bit set: reversed
+    const auto reversed = cpt::deserialize(cpt::serialize(compiled));
+
+    expect((forward.vm_regions.front().opcode_seed >> 63) == 0 &&
+               (reversed.vm_regions.front().opcode_seed >> 63) == 1,
+           "test seeds should select forward and reversed regions");
+    expect(cpt::execute(forward) == literal && cpt::execute(reversed) == literal,
+           "masked immediates should decode correctly in both region "
+           "directions");
+}
+
+// for loops, break, and continue: iteration, flow control, nesting, empty
+// clauses, error cases, and equivalence under obfuscation.
+void for_loop_test() {
+    expect(cpt::execute(cpt::deserialize(cpt::serialize(cpt::compile(R"(
+        fn main() -> i64 {
+            i64 sum = i64(0);
+            for (i64 i = i64(0); i < i64(10); i = i + i64(1)) {
+                sum = sum + i;
+            }
+            return sum;
+        }
+    )")))) == 45, "for loops should iterate and accumulate");
+
+    expect(cpt::execute(cpt::compile(R"(
+        fn main() -> i64 {
+            i64 sum = i64(0);
+            for (i64 i = i64(0); i < i64(100); i = i + i64(1)) {
+                if (i == i64(3)) { continue; }
+                if (i == i64(7)) { break; }
+                sum = sum + i;
+            }
+            return sum;
+        }
+    )")) == 18, "break and continue should control for-loop flow");
+
+    expect(cpt::execute(cpt::compile(R"(
+        fn main() -> i64 {
+            i64 n = i64(0);
+            for (i64 a = i64(0); a < i64(4); a = a + i64(1)) {
+                for (i64 b = i64(0); b < i64(4); b = b + i64(1)) {
+                    if (b == i64(2)) { break; }
+                    n = n + i64(1);
+                }
+            }
+            return n;
+        }
+    )")) == 8, "break should scope to the innermost loop");
+
+    expect(cpt::execute(cpt::compile(R"(
+        fn main() -> i64 {
+            i64 evens = i64(0);
+            i64 j = i64(0);
+            while (j < i64(10)) {
+                j = j + i64(1);
+                if (j % i64(2) == i64(1)) { continue; }
+                evens = evens + j;
+            }
+            return evens;
+        }
+    )")) == 30, "continue should re-check the condition in while loops");
+
+    expect(cpt::execute(cpt::compile(R"(
+        fn main() -> i64 {
+            i64 c = i64(0);
+            for (;;) {
+                c = c + i64(1);
+                if (c >= i64(5)) { break; }
+            }
+            return c;
+        }
+    )")) == 5, "for(;;) with break should terminate");
+
+    try {
+        static_cast<void>(
+            cpt::compile("fn main() -> i64 { break; return i64(0); }"));
+        expect(false, "break outside a loop should be a compile error");
+    } catch (const cpt::CompileError&) {
+    }
+    try {
+        static_cast<void>(
+            cpt::compile("fn main() -> i64 { continue; return i64(0); }"));
+        expect(false, "continue outside a loop should be a compile error");
+    } catch (const cpt::CompileError&) {
+    }
+
+    constexpr std::string_view body = R"(
+        fn compute() -> i64 {
+            i64 total = i64(0);
+            for (i64 i = i64(1); i <= i64(20); i = i + i64(1)) {
+                if (i % i64(5) == i64(0)) { continue; }
+                if (i > i64(17)) { break; }
+                total = total + i * i;
+            }
+            return total;
+        }
+        fn main() -> i64 { return compute(); }
+    )";
+    const std::string plain(body);
+    const std::string obfuscated = "@complexity(100)\n" + std::string(body);
+    const auto expected = run_seeded(plain, 4, 12);
+    bool equivalent = expected > 0;
+    for (std::uint64_t seed = 0; seed < 40 && equivalent; ++seed) {
+        equivalent = run_seeded(obfuscated, 4, seed) == expected;
+    }
+    expect(equivalent,
+           "obfuscated for loops with break/continue should match the plain "
+           "result across seeds");
 }
 
 void class_test() {
@@ -1415,6 +1933,17 @@ int main() {
         bytecode_direction_test();
         handler_mutation_test();
         complexity_decorator_test();
+        mba_nested_equivalence_test();
+        immediate_masking_test();
+        opaque_predicate_flow_test();
+        masked_locals_pointer_test();
+        obfuscated_float_test();
+        obfuscated_string_test();
+        obfuscated_unary_compare_test();
+        cross_frame_pointer_test();
+        obfuscated_conversion_test();
+        reversed_region_immediate_test();
+        for_loop_test();
         class_test();
         pointer_test();
         array_heap_test();

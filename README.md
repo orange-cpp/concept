@@ -220,7 +220,8 @@ The bootstrap subset supports:
 - explicit casts such as `u8(value)`, `f64(value)`, and `bool(value)`;
 - typed functions with multiple arguments, including forward calls and
   recursion;
-- typed local variables, assignment, blocks, `if`/`else`, and `while`;
+- typed local variables, assignment, blocks, `if`/`else`, `while`, and
+  `for` loops with `break` and `continue`;
 - `+`, `-`, `*`, `/`, `%`, shifts `<<`/`>>`, bitwise `&`/`|`/`^`, and
   unary `-`/`!`/`~`;
 - `==`, `!=`, `<`, `<=`, `>`, and `>=`;

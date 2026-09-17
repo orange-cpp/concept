@@ -40,6 +40,9 @@ enum class TokenKind {
     if_kw,
     else_kw,
     while_kw,
+    for_kw,
+    break_kw,
+    continue_kw,
     true_kw,
     false_kw,
     at,
@@ -270,6 +273,12 @@ public:
                 kind = TokenKind::else_kw;
             } else if (text == "while") {
                 kind = TokenKind::while_kw;
+            } else if (text == "for") {
+                kind = TokenKind::for_kw;
+            } else if (text == "break") {
+                kind = TokenKind::break_kw;
+            } else if (text == "continue") {
+                kind = TokenKind::continue_kw;
             } else if (text == "true") {
                 kind = TokenKind::true_kw;
             } else if (text == "false") {
@@ -510,6 +519,9 @@ struct Stmt {
         return_value,
         if_statement,
         while_statement,
+        for_statement,
+        break_statement,
+        continue_statement,
     } kind{};
     Token token;
     std::string name;
@@ -520,8 +532,11 @@ struct Stmt {
     std::string class_name;
     std::unique_ptr<Expr> target;
     std::unique_ptr<Expr> expression;
+    // For `for` loops: first = initializer, second = body, third = step,
+    // expression = condition. For `if`/`while`: first/second as before.
     std::unique_ptr<Stmt> first;
     std::unique_ptr<Stmt> second;
+    std::unique_ptr<Stmt> third;
     std::vector<std::unique_ptr<Stmt>> statements;
 };
 
@@ -953,11 +968,55 @@ private:
             statement->first = parse_statement();
             return statement;
         }
+        if (match(TokenKind::for_kw)) {
+            auto statement = std::make_unique<Stmt>();
+            statement->kind = Stmt::Kind::for_statement;
+            statement->token = current_;
+            consume(TokenKind::left_paren, "expected '(' after 'for'");
+            // Initializer: a variable declaration or expression statement, or
+            // empty. parse_statement consumes its own trailing ';'.
+            if (!match(TokenKind::semicolon)) {
+                statement->first = parse_statement();
+            }
+            // Condition (optional; an absent condition is always true).
+            if (current_.kind != TokenKind::semicolon) {
+                statement->expression = parse_expression();
+            }
+            consume(TokenKind::semicolon, "expected ';' after for condition");
+            // Step (optional; an expression or assignment without ';').
+            if (current_.kind != TokenKind::right_paren) {
+                statement->third = parse_expression_statement(false);
+            }
+            consume(TokenKind::right_paren, "expected ')' after for clauses");
+            statement->second = parse_statement();
+            return statement;
+        }
+        if (match(TokenKind::break_kw)) {
+            auto statement = std::make_unique<Stmt>();
+            statement->kind = Stmt::Kind::break_statement;
+            statement->token = current_;
+            consume(TokenKind::semicolon, "expected ';' after 'break'");
+            return statement;
+        }
+        if (match(TokenKind::continue_kw)) {
+            auto statement = std::make_unique<Stmt>();
+            statement->kind = Stmt::Kind::continue_statement;
+            statement->token = current_;
+            consume(TokenKind::semicolon, "expected ';' after 'continue'");
+            return statement;
+        }
+        return parse_expression_statement(true);
+    }
+
+    std::unique_ptr<Stmt> parse_expression_statement(
+        const bool require_semicolon) {
         auto statement = std::make_unique<Stmt>();
         statement->kind = Stmt::Kind::expression;
         statement->token = current_;
         auto first_expression = parse_expression();
+        bool is_assignment = false;
         if (match(TokenKind::assign)) {
+            is_assignment = true;
             const bool indirect =
                 (first_expression->kind == Expr::Kind::unary &&
                  first_expression->op == TokenKind::star) ||
@@ -974,10 +1033,13 @@ private:
             statement->name = first_expression->name;
             statement->target = std::move(first_expression);
             statement->expression = parse_expression();
-            consume(TokenKind::semicolon, "expected ';' after assignment");
         } else {
             statement->expression = std::move(first_expression);
-            consume(TokenKind::semicolon, "expected ';' after expression");
+        }
+        if (require_semicolon) {
+            consume(TokenKind::semicolon,
+                    is_assignment ? "expected ';' after assignment"
+                                  : "expected ';' after expression");
         }
         return statement;
     }
@@ -1633,6 +1695,14 @@ private:
     std::unordered_set<std::string> generic_specialization_names_;
     std::unordered_map<std::string, LocalInfo> locals_;
     std::vector<CallPatch> call_patches_;
+    // Break/continue jump placeholders for each enclosing loop; the innermost
+    // loop is the back element. Patched to the loop exit / continue point once
+    // those offsets are known.
+    struct LoopContext {
+        std::vector<std::size_t> break_placeholders;
+        std::vector<std::size_t> continue_placeholders;
+    };
+    std::vector<LoopContext> loop_stack_;
     std::vector<std::string> strings_;
     ValueType current_return_type_{ValueType::i64};
     std::uint8_t current_return_pointer_depth_{};
@@ -2208,10 +2278,72 @@ private:
             compile_expression_as(*statement.expression, ValueType::boolean);
             emit(Op::jump_if_false);
             const auto loop_end = reserve_u32();
+            loop_stack_.emplace_back();
             compile_statement(*statement.first);
+            const auto context = std::move(loop_stack_.back());
+            loop_stack_.pop_back();
             emit(Op::jump);
             emit_u32(loop_start);
-            patch_u32(loop_end, checked_offset());
+            const auto end_offset = checked_offset();
+            patch_u32(loop_end, end_offset);
+            for (const auto placeholder : context.break_placeholders) {
+                patch_u32(placeholder, end_offset);
+            }
+            for (const auto placeholder : context.continue_placeholders) {
+                patch_u32(placeholder, loop_start);
+            }
+            return;
+        }
+        case Stmt::Kind::for_statement: {
+            if (statement.first) {
+                compile_statement(*statement.first);
+            }
+            const auto condition_start = checked_offset();
+            const bool has_condition = static_cast<bool>(statement.expression);
+            std::size_t loop_end = 0;
+            if (has_condition) {
+                compile_expression_as(*statement.expression,
+                                      ValueType::boolean);
+                emit(Op::jump_if_false);
+                loop_end = reserve_u32();
+            }
+            loop_stack_.emplace_back();
+            compile_statement(*statement.second);
+            const auto context = std::move(loop_stack_.back());
+            loop_stack_.pop_back();
+            const auto step_target = checked_offset();
+            if (statement.third) {
+                compile_statement(*statement.third);
+            }
+            emit(Op::jump);
+            emit_u32(condition_start);
+            const auto end_offset = checked_offset();
+            if (has_condition) {
+                patch_u32(loop_end, end_offset);
+            }
+            for (const auto placeholder : context.break_placeholders) {
+                patch_u32(placeholder, end_offset);
+            }
+            for (const auto placeholder : context.continue_placeholders) {
+                patch_u32(placeholder, step_target);
+            }
+            return;
+        }
+        case Stmt::Kind::break_statement: {
+            if (loop_stack_.empty()) {
+                fail(statement.token, "'break' is only valid inside a loop");
+            }
+            emit(Op::jump);
+            loop_stack_.back().break_placeholders.push_back(reserve_u32());
+            return;
+        }
+        case Stmt::Kind::continue_statement: {
+            if (loop_stack_.empty()) {
+                fail(statement.token,
+                     "'continue' is only valid inside a loop");
+            }
+            emit(Op::jump);
+            loop_stack_.back().continue_placeholders.push_back(reserve_u32());
             return;
         }
         }

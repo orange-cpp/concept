@@ -1,0 +1,23 @@
+// for / break / continue exercised alongside while, all under maximum
+// obfuscation. Returns the packaged-program success code 42.
+@complexity(100)
+fn compute() -> i64 {
+    i64 sum = i64(0);
+    for (i64 i = i64(0); i < i64(100); i = i + i64(1)) {
+        if (i == i64(50)) { break; }
+        if (i % i64(10) != i64(0)) { continue; }
+        sum = sum + i;
+    }
+    i64 count = i64(0);
+    i64 n = i64(0);
+    while (n < i64(1000)) {
+        n = n + i64(1);
+        if (n > i64(58)) { break; }
+        count = count + i64(1);
+    }
+    return sum - count;
+}
+
+fn main() -> int {
+    return i32(compute());
+}

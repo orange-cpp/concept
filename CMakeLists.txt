@@ -259,6 +259,14 @@ if(BUILD_TESTING)
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-masked-locals-smoke.exe
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
     )
+    add_test(
+        NAME concept-packaged-for-loop
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/for-loop-self-test.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-for-loop-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
     if(WIN32)
         add_executable(concept-dll-loader tests/dll_loader.cpp)
         if(MSVC)

@@ -220,9 +220,15 @@ statement = block
           | "return", expression, ";"
           | "if", "(", expression, ")", statement,
             [ "else", statement ]
-          | "while", "(", expression, ")", statement ;
+          | "while", "(", expression, ")", statement
+          | "for", "(", [ for-init ], ";", [ expression ], ";",
+            [ for-step ], ")", statement
+          | "break", ";"
+          | "continue", ";" ;
 variable-declaration = local-type, identifier,
                        [ "[", integer-literal, "]" | "=", expression ] ;
+for-init = variable-declaration | assignment | expression ;
+for-step = assignment | expression ;
 ```
 
 Examples:
@@ -237,11 +243,30 @@ if (answer == 42) {
 while (answer < 42) {
     answer = answer + 1;
 }
+
+i64 sum = 0;
+for (i64 i = 0; i < 10; i = i + 1) {
+    if (i == 3) {
+        continue;
+    }
+    if (i == 7) {
+        break;
+    }
+    sum = sum + i;
+}
 ```
 
 Numeric and `bool` expressions can be used as conditions. Zero is false and a
 nonzero value is true. Strings, pointers, and objects cannot be conditions.
-There are no `for`, `do`, `switch`, `break`, or `continue` statements yet.
+
+A `for` loop runs its initializer once, tests the condition before each
+iteration, and runs the step after each iteration. Every clause is optional, so
+`for (;;)` loops until a `break`. The initializer may declare a loop variable,
+which remains in scope for the rest of the function. `break` exits the nearest
+enclosing `for` or `while` loop; `continue` skips to that loop's next iteration
+(the step expression in a `for`, or the condition in a `while`). Using `break`
+or `continue` outside a loop is a compile error. There are no `do` or `switch`
+statements yet.
 
 ## Expressions and precedence
 
@@ -774,6 +799,10 @@ statement      = block
                | "if", "(", expression, ")", statement,
                  [ "else", statement ]
                | "while", "(", expression, ")", statement
+               | "for", "(", [ statement-or-empty ], [ expression ], ";",
+                 [ lvalue, "=", expression | expression ], ")", statement
+               | "break", ";"
+               | "continue", ";"
                | expression, ";" ;
 
 lvalue         = identifier | member-expression | index-expression
@@ -811,7 +840,7 @@ The current language does not yet provide:
   arguments;
 - class or no-value (`void`) function returns;
 - object destruction;
-- `for`, `do`, `switch`, `break`, or `continue`;
+- `do` or `switch` statements;
 - logical short-circuit, compound-assignment, increment, decrement, or ternary
   operators;
 - string concatenation, indexing, or numeric conversion;
