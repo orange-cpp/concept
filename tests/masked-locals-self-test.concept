@@ -1,0 +1,25 @@
+// Exercises masked frame locals together with address-of-local pinning:
+// pointer writes must reach the (pinned, plaintext) slot while other locals
+// stay masked, all under maximum obfuscation complexity.
+@complexity(100)
+fn check() -> i64 {
+    i64 a = 10;
+    i64 b = 20;
+    i64 c = 30;
+    i64* p = &a;
+    *p = 99;
+    i64 d = a + b;
+    i64* q = &d;
+    *q = *q + c;
+    i64* r = &c;
+    *r = *r + b;
+    return d + c;
+}
+
+fn main() -> int {
+    i64 result = check();
+    if (result == 199) {
+        return 42;
+    }
+    return 1;
+}

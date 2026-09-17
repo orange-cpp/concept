@@ -216,6 +216,30 @@ make_vm_regions(const std::vector<std::uint8_t>& canonical_code,
     return regions;
 }
 
+// Masks every push_bits immediate in place, keyed by the containing region's
+// opcode seed and the instruction's offset. Runs on canonical-order code so the
+// opcode bytes and little-endian operands are still identifiable; the VM
+// applies the identical mask in its push_bits handler to recover the value.
+void mask_immediates(std::vector<std::uint8_t>& code,
+                     const std::vector<Bytecode::VmRegion>& regions) {
+    for (const auto& region : regions) {
+        std::size_t offset = region.begin;
+        while (offset < region.end) {
+            const auto op = static_cast<Op>(code[offset]);
+            const auto size = operand_size(op);
+            if (op == Op::push_bits && size == 8 &&
+                offset + 1 + size <= region.end) {
+                const auto mask = immediate_mask(region.opcode_seed, offset);
+                for (std::size_t byte = 0; byte < 8; ++byte) {
+                    code[offset + 1 + byte] ^=
+                        static_cast<std::uint8_t>(mask >> (byte * 8));
+                }
+            }
+            offset += 1 + size;
+        }
+    }
+}
+
 std::vector<std::uint8_t> encode_opcodes(
     const std::vector<std::uint8_t>& canonical_code,
     const std::vector<Bytecode::VmRegion>& regions) {
@@ -473,6 +497,7 @@ std::vector<std::uint8_t> serialize(const Bytecode& bytecode) {
         throw std::runtime_error(
             xorstr_("too many VM regions in Concept bytecode"));
     }
+    mask_immediates(canonical_code, regions);
     auto encoded_code = encode_opcodes(canonical_code, regions);
     apply_region_directions(encoded_code, regions);
     transform_code(encoded_code, regions, bytecode.string_key,
@@ -583,6 +608,7 @@ Bytecode deserialize(const std::span<const std::uint8_t> bytes) {
     transform_code(encoded_code, bytecode.vm_regions,
                    bytecode.string_key, bytecode.string_nonce, false);
     bytecode.code = decode_opcodes(encoded_code, bytecode.vm_regions);
+    bytecode.immediates_masked = true;
     cursor += code_size;
     if (string_count > (bytes.size() - cursor) / 4) {
         throw std::runtime_error(

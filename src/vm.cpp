@@ -37,6 +37,10 @@
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
+#endif
 #endif
 
 namespace cpt {
@@ -49,6 +53,10 @@ struct Frame {
     std::vector<std::uint64_t> locals;
     std::uint64_t constructor_result{};
     std::uint8_t complexity{};
+    // Locals of an obfuscated frame are XOR-masked in memory. A slot is pinned
+    // (unmasked in place) once its address is taken, so pointer and native
+    // access always see plaintext storage. Empty until the frame first masks.
+    std::vector<bool> local_pinned{};
 };
 
 struct PointerTarget {
@@ -96,6 +104,21 @@ std::uint8_t handler_variant(const std::uint64_t seed,
     const auto domain = static_cast<std::uint64_t>(op) + 1;
     return static_cast<std::uint8_t>(
         mix_handler_state(seed ^ (domain * 0x9e3779b97f4a7c15ULL)) & 3);
+}
+
+// Per-site selector for mixed boolean-arithmetic handler variants. Unlike the
+// operand-order/substitution variant this is derived from the instruction
+// offset as well, so two identical operations at different addresses evaluate
+// through different (but arithmetically identical) expression trees.
+std::uint8_t handler_mba(const std::uint64_t seed, const Op op,
+                         const std::size_t instruction_offset) noexcept {
+    const auto domain = static_cast<std::uint64_t>(op) + 1;
+    return static_cast<std::uint8_t>(
+        mix_handler_state(
+            seed ^ (domain * 0x9e3779b97f4a7c15ULL) ^
+            (static_cast<std::uint64_t>(instruction_offset) *
+             0xff51afd7ed558ccdULL)) &
+        0xff);
 }
 
 #if defined(_MSC_VER)
@@ -612,6 +635,92 @@ bool verify_system_x509_chain(
     } catch (...) {
         return false;
     }
+#elif defined(__APPLE__)
+    if (host.empty() || encoded.empty()) {
+        return false;
+    }
+
+    // The payload is a sequence of big-endian u32 length prefixes, each
+    // followed by a DER-encoded certificate; the first entry is the leaf.
+    const auto release = [](CFTypeRef reference) {
+        if (reference != nullptr) {
+            CFRelease(reference);
+        }
+    };
+
+    CFMutableArrayRef certificates =
+        CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    if (certificates == nullptr) {
+        return false;
+    }
+
+    bool parsed = true;
+    std::size_t offset = 0;
+    while (offset < encoded.size()) {
+        if (encoded.size() - offset < 4) {
+            parsed = false;
+            break;
+        }
+        const auto length =
+            (static_cast<std::uint32_t>(encoded[offset]) << 24) |
+            (static_cast<std::uint32_t>(encoded[offset + 1]) << 16) |
+            (static_cast<std::uint32_t>(encoded[offset + 2]) << 8) |
+            static_cast<std::uint32_t>(encoded[offset + 3]);
+        offset += 4;
+        if (length == 0 || length > encoded.size() - offset) {
+            parsed = false;
+            break;
+        }
+        CFDataRef data = CFDataCreate(
+            kCFAllocatorDefault, encoded.data() + offset,
+            static_cast<CFIndex>(length));
+        if (data == nullptr) {
+            parsed = false;
+            break;
+        }
+        SecCertificateRef certificate =
+            SecCertificateCreateWithData(kCFAllocatorDefault, data);
+        release(data);
+        if (certificate == nullptr) {
+            parsed = false;
+            break;
+        }
+        CFArrayAppendValue(certificates, certificate);
+        release(certificate);
+        offset += length;
+    }
+
+    if (!parsed || CFArrayGetCount(certificates) == 0) {
+        release(certificates);
+        return false;
+    }
+
+    CFStringRef server_name = CFStringCreateWithBytes(
+        kCFAllocatorDefault,
+        reinterpret_cast<const std::uint8_t*>(host.data()),
+        static_cast<CFIndex>(host.size()), kCFStringEncodingUTF8, false);
+    SecPolicyRef policy =
+        server_name != nullptr ? SecPolicyCreateSSL(true, server_name)
+                               : nullptr;
+    release(server_name);
+    if (policy == nullptr) {
+        release(certificates);
+        return false;
+    }
+
+    SecTrustRef trust = nullptr;
+    const OSStatus status =
+        SecTrustCreateWithCertificates(certificates, policy, &trust);
+    release(policy);
+    release(certificates);
+    if (status != errSecSuccess || trust == nullptr) {
+        release(trust);
+        return false;
+    }
+
+    const bool valid = SecTrustEvaluateWithError(trust, nullptr);
+    release(trust);
+    return valid;
 #else
     static_cast<void>(host);
     static_cast<void>(encoded);
@@ -1174,28 +1283,72 @@ std::uint64_t floating_arithmetic(const Op op, const ValueType type,
 std::uint64_t integral_arithmetic(const Op op, const ValueType type,
                                   const std::uint64_t left,
                                   const std::uint64_t right,
-                                  const bool substituted) {
+                                  const std::uint8_t mba) {
     const auto lhs = normalize_integral(type, left);
     const auto rhs = normalize_integral(type, right);
+    // Every branch below is arithmetically identical modulo 2^width; the
+    // selector only changes which equivalent expression tree runs. A value
+    // barrier on one sub-term stops the optimizer from folding the identity
+    // back to the canonical operation.
+    const auto barrier = [](const std::uint64_t value) {
+        return handler_value_barrier(value);
+    };
     switch (op) {
     case Op::add:
-        return normalize_integral(
-            type, substituted
-                      ? lhs - handler_value_barrier(std::uint64_t{0} - rhs)
-                      : lhs + rhs);
+        switch (mba & 3) {
+        case 1:
+            return normalize_integral(
+                type, lhs - barrier(std::uint64_t{0} - rhs));
+        case 2:
+            return normalize_integral(
+                type, (lhs ^ rhs) + 2 * barrier(lhs & rhs));
+        case 3:
+            return normalize_integral(type, (lhs | rhs) + barrier(lhs & rhs));
+        default:
+            return normalize_integral(type, lhs + rhs);
+        }
     case Op::subtract:
-        return normalize_integral(
-            type, substituted
-                      ? lhs + handler_value_barrier(std::uint64_t{0} - rhs)
-                      : lhs - rhs);
+        switch (mba & 3) {
+        case 1:
+            return normalize_integral(
+                type, lhs + barrier(std::uint64_t{0} - rhs));
+        case 2:
+            return normalize_integral(
+                type, (lhs ^ rhs) - 2 * barrier((~lhs) & rhs));
+        case 3:
+            return normalize_integral(type, lhs + barrier(~rhs) + 1);
+        default:
+            return normalize_integral(type, lhs - rhs);
+        }
     case Op::multiply:
         return normalize_integral(type, lhs * rhs);
     case Op::bit_and:
-        return normalize_integral(type, lhs & rhs);
+        switch (mba & 3) {
+        case 1:
+            return normalize_integral(type, (lhs | rhs) - barrier(lhs ^ rhs));
+        case 2:
+            return normalize_integral(type, lhs - barrier(lhs & ~rhs));
+        default:
+            return normalize_integral(type, lhs & rhs);
+        }
     case Op::bit_or:
-        return normalize_integral(type, lhs | rhs);
+        switch (mba & 3) {
+        case 1:
+            return normalize_integral(type, barrier(lhs & rhs) + (lhs ^ rhs));
+        case 2:
+            return normalize_integral(type, lhs + barrier(rhs & ~lhs));
+        default:
+            return normalize_integral(type, lhs | rhs);
+        }
     case Op::bit_xor:
-        return normalize_integral(type, lhs ^ rhs);
+        switch (mba & 3) {
+        case 1:
+            return normalize_integral(type, (lhs | rhs) - barrier(lhs & rhs));
+        case 2:
+            return normalize_integral(type, (lhs | rhs) & barrier(~(lhs & rhs)));
+        default:
+            return normalize_integral(type, lhs ^ rhs);
+        }
     case Op::shift_left:
     case Op::shift_right: {
         const auto width = integral_width(type);
@@ -1249,10 +1402,180 @@ std::uint64_t integral_arithmetic(const Op op, const ValueType type,
 std::uint64_t arithmetic(const Op op, const ValueType type,
                          const std::uint64_t left,
                          const std::uint64_t right,
-                         const bool substituted) {
+                         const std::uint8_t mba) {
     return is_floating(type) ? floating_arithmetic(op, type, left, right)
-                             : integral_arithmetic(op, type, left, right,
-                                                   substituted);
+                             : integral_arithmetic(op, type, left, right, mba);
+}
+
+// ---------------------------------------------------------------------------
+// Nested virtualization: selected integer operations are not computed directly
+// but by interpreting a small inner "micro-program" on a second, self-contained
+// interpreter with its own opcode set. The micro-program bytes are kept XOR
+// masked and decoded one step at a time, so a dynamic observer sees an inner
+// dispatch loop rather than a machine ADD. Results are identical to the direct
+// handler; this only raises the cost of understanding the arithmetic.
+// ---------------------------------------------------------------------------
+enum class MicroOp : std::uint8_t {
+    push_a,
+    push_b,
+    dup,
+    add,
+    sub,
+    mul,
+    bit_and,
+    bit_or,
+    bit_xor,
+    negate,
+    halt,
+};
+
+std::uint8_t micro_keystream(const std::uint64_t seed,
+                             const std::size_t position) noexcept {
+    return static_cast<std::uint8_t>(
+        mix_handler_state(seed ^ (static_cast<std::uint64_t>(position) *
+                                  0x9e3779b97f4a7c15ULL)) &
+        0xff);
+}
+
+std::uint64_t run_micro_program(const std::uint8_t* encoded,
+                                const std::size_t length,
+                                const std::uint64_t a, const std::uint64_t b,
+                                const std::uint64_t seed) {
+    std::array<std::uint64_t, 16> stack{};
+    std::size_t sp = 0;
+    const auto push = [&](const std::uint64_t value) {
+        if (sp >= stack.size()) {
+            throw std::logic_error(xorstr_("nested VM stack overflow"));
+        }
+        stack[sp++] = value;
+    };
+    const auto pop = [&]() -> std::uint64_t {
+        if (sp == 0) {
+            throw std::logic_error(xorstr_("nested VM stack underflow"));
+        }
+        return stack[--sp];
+    };
+    for (std::size_t pc = 0; pc < length; ++pc) {
+        switch (static_cast<MicroOp>(encoded[pc] ^ micro_keystream(seed, pc))) {
+        case MicroOp::push_a:
+            push(a);
+            break;
+        case MicroOp::push_b:
+            push(b);
+            break;
+        case MicroOp::dup: {
+            const auto top = pop();
+            push(top);
+            push(top);
+            break;
+        }
+        case MicroOp::add: {
+            const auto rhs = pop();
+            push(pop() + rhs);
+            break;
+        }
+        case MicroOp::sub: {
+            const auto rhs = pop();
+            push(pop() - rhs);
+            break;
+        }
+        case MicroOp::mul: {
+            const auto rhs = pop();
+            push(pop() * rhs);
+            break;
+        }
+        case MicroOp::bit_and: {
+            const auto rhs = pop();
+            push(pop() & rhs);
+            break;
+        }
+        case MicroOp::bit_or: {
+            const auto rhs = pop();
+            push(pop() | rhs);
+            break;
+        }
+        case MicroOp::bit_xor: {
+            const auto rhs = pop();
+            push(pop() ^ rhs);
+            break;
+        }
+        case MicroOp::negate:
+            push(std::uint64_t{0} - pop());
+            break;
+        case MicroOp::halt:
+            return pop();
+        }
+    }
+    return pop();
+}
+
+// Returns true and writes the result when `op` is virtualized through the
+// inner interpreter for this instruction; false to fall back to the direct
+// handler. Only integer add/sub/mul/and/or/xor participate.
+bool nested_binary_op(const Op op, const ValueType type,
+                      const std::uint64_t left, const std::uint64_t right,
+                      const std::uint64_t seed, const std::uint8_t selector,
+                      std::uint64_t& result) {
+    const bool use_mba = (selector & 0x10) != 0;
+    std::vector<MicroOp> program;
+    switch (op) {
+    case Op::add:
+        program = use_mba ? std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::bit_xor, MicroOp::push_a,
+                                                 MicroOp::push_b, MicroOp::bit_and,
+                                                 MicroOp::dup, MicroOp::add,
+                                                 MicroOp::add, MicroOp::halt}
+                          : std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::add, MicroOp::halt};
+        break;
+    case Op::subtract:
+        program = use_mba ? std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::negate, MicroOp::add,
+                                                 MicroOp::halt}
+                          : std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::sub, MicroOp::halt};
+        break;
+    case Op::multiply:
+        program = {MicroOp::push_a, MicroOp::push_b, MicroOp::mul, MicroOp::halt};
+        break;
+    case Op::bit_and:
+        program = use_mba ? std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::bit_or, MicroOp::push_a,
+                                                 MicroOp::push_b, MicroOp::bit_xor,
+                                                 MicroOp::sub, MicroOp::halt}
+                          : std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::bit_and, MicroOp::halt};
+        break;
+    case Op::bit_or:
+        program = use_mba ? std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::bit_and, MicroOp::push_a,
+                                                 MicroOp::push_b, MicroOp::bit_xor,
+                                                 MicroOp::add, MicroOp::halt}
+                          : std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::bit_or, MicroOp::halt};
+        break;
+    case Op::bit_xor:
+        program = use_mba ? std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::bit_or, MicroOp::push_a,
+                                                 MicroOp::push_b, MicroOp::bit_and,
+                                                 MicroOp::sub, MicroOp::halt}
+                          : std::vector<MicroOp>{MicroOp::push_a, MicroOp::push_b,
+                                                 MicroOp::bit_xor, MicroOp::halt};
+        break;
+    default:
+        return false;
+    }
+
+    std::vector<std::uint8_t> encoded(program.size());
+    for (std::size_t index = 0; index < program.size(); ++index) {
+        encoded[index] = static_cast<std::uint8_t>(program[index]) ^
+                         micro_keystream(seed, index);
+    }
+    result = normalize_integral(
+        type, run_micro_program(encoded.data(), encoded.size(),
+                                normalize_integral(type, left),
+                                normalize_integral(type, right), seed));
+    return true;
 }
 
 bool compare_values_canonical(const Op op, const ValueType type,
@@ -1383,8 +1706,24 @@ std::uint64_t negate_value(const ValueType type, const std::uint64_t bits) {
     return normalize_integral(type, std::uint64_t{0} - bits);
 }
 
+// String handles are opaque 64-bit values on the operand stack. The top bit
+// tags a handle as an immutable string constant whose remaining bits index the
+// bytecode's constant table; without the bit the handle indexes the dynamic
+// text heap. Tagging constants keeps them zero-copy so repeatedly pushing the
+// same literal (for example inside a loop) neither copies nor grows the heap.
+constexpr std::uint64_t text_constant_flag = std::uint64_t{1} << 63;
+
 const std::string& text_value(const std::vector<std::string>& heap,
+                              const std::vector<std::string>& constants,
                               const std::uint64_t handle) {
+    if ((handle & text_constant_flag) != 0) {
+        const auto index = handle & ~text_constant_flag;
+        if (index >= constants.size()) {
+            throw std::runtime_error(
+                xorstr_("Concept VM string handle is invalid"));
+        }
+        return constants[static_cast<std::size_t>(index)];
+    }
     if (handle >= heap.size()) {
         throw std::runtime_error(
             xorstr_("Concept VM string handle is invalid"));
@@ -1450,6 +1789,7 @@ double read_input_f64() {
 
 void print_value(const ValueType type, const std::uint64_t bits,
                  const std::vector<std::string>& heap,
+                 const std::vector<std::string>& constants,
                  const bool newline) {
     switch (type) {
     case ValueType::boolean:
@@ -1474,7 +1814,7 @@ void print_value(const ValueType type, const std::uint64_t bits,
         std::cout << f64_value(bits);
         break;
     case ValueType::text:
-        std::cout << text_value(heap, bits);
+        std::cout << text_value(heap, constants, bits);
         break;
     case ValueType::void_type:
         throw std::runtime_error(
@@ -1588,14 +1928,64 @@ std::int64_t execute(const Bytecode& bytecode) {
             "Concept instruction pointer belongs to no VM context"));
     };
 
+    // Operand-stack values are kept XOR-masked in memory with a per-run key so
+    // a raw stack dump does not reveal plaintext intermediates. The mask is a
+    // function of the absolute slot index, so it survives truncation on return
+    // and is applied/removed only transiently as values are pushed and popped.
+    const std::uint64_t stack_mask_key = [&] {
+        std::random_device device;
+        auto key = (static_cast<std::uint64_t>(device()) << 32) ^
+                   static_cast<std::uint64_t>(device());
+        key ^= static_cast<std::uint64_t>(
+            reinterpret_cast<std::uintptr_t>(&stack));
+        return mix_handler_state(key ^ 0x243f6a8885a308d3ULL);
+    }();
+    const auto stack_mask = [&](const std::size_t index) {
+        return mix_handler_state(stack_mask_key ^
+                                 (static_cast<std::uint64_t>(index) *
+                                  0x9e3779b97f4a7c15ULL));
+    };
+    const auto push_value = [&](const std::uint64_t value) {
+        stack.push_back(value ^ stack_mask(stack.size()));
+    };
+
     const auto pop = [&]() {
         if (stack.empty() || stack.size() <= frames.back().stack_base) {
             throw std::runtime_error(
                 xorstr_("Concept VM operand stack underflow"));
         }
-        const auto value = stack.back();
+        const auto value = stack.back() ^ stack_mask(stack.size() - 1);
         stack.pop_back();
         return value;
+    };
+
+    // Per-run key and derivations for masking frame locals in memory. The raw
+    // mask is keyed by the frame id and slot; the effective mask is zero for an
+    // unobfuscated frame or a pinned (address-taken) slot, which are stored in
+    // the clear.
+    const std::uint64_t session_local_key = [&] {
+        std::random_device device;
+        auto key = (static_cast<std::uint64_t>(device()) << 32) ^
+                   static_cast<std::uint64_t>(device());
+        key ^= static_cast<std::uint64_t>(
+            reinterpret_cast<std::uintptr_t>(&frames));
+        return mix_handler_state(key ^ 0xa5a5a5a5c3c3c3c3ULL);
+    }();
+    const auto local_raw_mask = [&](const std::uint64_t frame_id,
+                                    const std::uint64_t index) {
+        return mix_handler_state(session_local_key ^ frame_id ^
+                                 (index * 0x9e3779b97f4a7c15ULL));
+    };
+    const auto local_effective_mask =
+        [&](const Frame& frame, const std::uint64_t index) -> std::uint64_t {
+        if (frame.complexity == 0) {
+            return 0;
+        }
+        if (index < frame.local_pinned.size() &&
+            frame.local_pinned[static_cast<std::size_t>(index)]) {
+            return 0;
+        }
+        return local_raw_mask(frame.id, index);
     };
 
     const auto pop_binary = [&](const bool reordered) {
@@ -1609,8 +1999,9 @@ std::int64_t execute(const Bytecode& bytecode) {
             throw std::runtime_error(
                 xorstr_("Concept VM operand stack underflow"));
         }
-        const auto left = stack[stack.size() - 2];
-        const auto right = stack.back();
+        const auto left =
+            stack[stack.size() - 2] ^ stack_mask(stack.size() - 2);
+        const auto right = stack.back() ^ stack_mask(stack.size() - 1);
         stack.resize(stack.size() - 2);
         return std::pair{left, right};
     };
@@ -1630,11 +2021,12 @@ std::int64_t execute(const Bytecode& bytecode) {
             throw std::runtime_error(
                 xorstr_("Concept VM operand stack underflow"));
         }
-        const auto first_argument = stack.end() -
-                                    static_cast<std::ptrdiff_t>(argument_count);
-        std::copy(first_argument, stack.end(),
-                  locals.begin() + static_cast<std::ptrdiff_t>(local_offset));
-        stack.erase(first_argument, stack.end());
+        const auto base = stack.size() - argument_count;
+        for (std::size_t index = 0; index < argument_count; ++index) {
+            locals[local_offset + index] =
+                stack[base + index] ^ stack_mask(base + index);
+        }
+        stack.resize(base);
     };
 
     const auto object_fields = [&](const std::uint64_t handle)
@@ -1924,26 +2316,35 @@ std::int64_t execute(const Bytecode& bytecode) {
             ip = physical_address(next_logical_instruction);
         }
         std::uint8_t variant = 0;
+        std::uint8_t mba = 0;
         if (frames.back().complexity != 0) {
             variant = handler_variant(vm.opcode_seed, op);
+            mba = handler_mba(vm.opcode_seed, op, instruction_offset);
             execute_handler_junk(
                 vm.opcode_seed, op, instruction_offset, variant);
         }
         const bool reordered = (variant & 1) != 0;
         const bool substituted = (variant & 2) != 0;
+        // Route selected integer ops through the inner interpreter (only under
+        // obfuscation; mba is 0 for an unobfuscated frame).
+        const bool nested = (mba & 0x20) != 0;
 
         switch (op) {
-        case Op::push_bits:
-            stack.push_back(operands.read_u64());
+        case Op::push_bits: {
+            auto value = operands.read_u64();
+            if (bytecode.immediates_masked) {
+                value ^= immediate_mask(vm.opcode_seed, logical_instruction);
+            }
+            push_value(value);
             break;
+        }
         case Op::push_text: {
             const auto index = operands.read_u32();
             if (index >= bytecode.strings.size()) {
                 throw std::runtime_error(xorstr_(
                     "Concept VM string constant is out of range"));
             }
-            text_heap.push_back(bytecode.strings[index]);
-            stack.push_back(text_heap.size() - 1);
+            push_value(text_constant_flag | index);
             break;
         }
         case Op::load: {
@@ -1952,7 +2353,8 @@ std::int64_t execute(const Bytecode& bytecode) {
                 throw std::runtime_error(
                     xorstr_("Concept VM local load is out of range"));
             }
-            stack.push_back(frames.back().locals[index]);
+            push_value(frames.back().locals[index] ^
+                       local_effective_mask(frames.back(), index));
             break;
         }
         case Op::store: {
@@ -1962,21 +2364,23 @@ std::int64_t execute(const Bytecode& bytecode) {
                     throw std::runtime_error(
                         xorstr_("Concept VM local store is out of range"));
                 }
-                frames.back().locals[index] = pop();
+                frames.back().locals[index] =
+                    pop() ^ local_effective_mask(frames.back(), index);
             } else {
                 const auto value = pop();
                 if (index >= frames.back().locals.size()) {
                     throw std::runtime_error(
                         xorstr_("Concept VM local store is out of range"));
                 }
-                frames.back().locals[index] = value;
+                frames.back().locals[index] =
+                    value ^ local_effective_mask(frames.back(), index);
             }
             break;
         }
         case Op::new_object: {
             const auto field_count = operands.read_u16();
             object_heap.emplace_back(field_count, 0);
-            stack.push_back(object_heap.size());
+            push_value(object_heap.size());
             break;
         }
         case Op::load_field: {
@@ -1986,7 +2390,7 @@ std::int64_t execute(const Bytecode& bytecode) {
                 throw std::runtime_error(xorstr_(
                     "Concept VM class field load is out of range"));
             }
-            stack.push_back(fields[index]);
+            push_value(fields[index]);
             break;
         }
         case Op::store_field: {
@@ -2006,9 +2410,21 @@ std::int64_t execute(const Bytecode& bytecode) {
                 throw std::runtime_error(
                     xorstr_("Concept VM local address is out of range"));
             }
+            // Pin the slot: unmask it in place so pointer and native access
+            // see plaintext storage for the life of the frame.
+            auto& frame = frames.back();
+            if (frame.complexity != 0) {
+                if (frame.local_pinned.size() < frame.locals.size()) {
+                    frame.local_pinned.resize(frame.locals.size(), false);
+                }
+                if (!frame.local_pinned[index]) {
+                    frame.locals[index] ^= local_raw_mask(frame.id, index);
+                    frame.local_pinned[index] = true;
+                }
+            }
             pointer_heap.push_back(
-                {PointerTarget::Kind::local, frames.back().id, index});
-            stack.push_back(pointer_heap.size());
+                {PointerTarget::Kind::local, frame.id, index});
+            push_value(pointer_heap.size());
             break;
         }
         case Op::address_field: {
@@ -2021,19 +2437,19 @@ std::int64_t execute(const Bytecode& bytecode) {
             }
             pointer_heap.push_back(
                 {PointerTarget::Kind::field, object, index});
-            stack.push_back(pointer_heap.size());
+            push_value(pointer_heap.size());
             break;
         }
         case Op::native_pointer: {
             const auto type = operands.read_type();
             const auto address = pop();
             if (address == 0) {
-                stack.push_back(0);
+                push_value(0);
                 break;
             }
             pointer_heap.push_back(
                 {PointerTarget::Kind::native_address, address, 0, type});
-            stack.push_back(pointer_heap.size());
+            push_value(pointer_heap.size());
             break;
         }
         case Op::array_alloc: {
@@ -2054,7 +2470,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto handle = pointer_heap.size();
             heap_pointer_handles.emplace(
                 HeapPointerKey{heap_blocks.size(), 0, type}, handle);
-            stack.push_back(handle);
+            push_value(handle);
             break;
         }
         case Op::heap_alloc: {
@@ -2073,13 +2489,13 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto handle = pointer_heap.size();
             heap_pointer_handles.emplace(
                 HeapPointerKey{heap_blocks.size(), 0, type}, handle);
-            stack.push_back(handle);
+            push_value(handle);
             break;
         }
         case Op::heap_free: {
             const auto pointer = pop();
             if (pointer == 0) {
-                stack.push_back(0);
+                push_value(0);
                 break;
             }
             const auto target = pointer_target(pointer);
@@ -2104,7 +2520,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             }
             block.bytes.clear();
             block.freed = true;
-            stack.push_back(0);
+            push_value(0);
             break;
         }
         case Op::pointer_offset: {
@@ -2114,7 +2530,7 @@ std::int64_t execute(const Bytecode& bytecode) {
                 offset_pointer_target(handle, offset_bits, type);
             if (adjusted.kind == PointerTarget::Kind::local ||
                 adjusted.kind == PointerTarget::Kind::field) {
-                stack.push_back(handle);
+                push_value(handle);
                 break;
             }
             if (adjusted.kind == PointerTarget::Kind::heap_block) {
@@ -2122,21 +2538,21 @@ std::int64_t execute(const Bytecode& bytecode) {
                     adjusted.owner, adjusted.index, adjusted.native_type};
                 const auto existing = heap_pointer_handles.find(key);
                 if (existing != heap_pointer_handles.end()) {
-                    stack.push_back(existing->second);
+                    push_value(existing->second);
                     break;
                 }
                 pointer_heap.push_back(adjusted);
                 const auto cached_handle = pointer_heap.size();
                 heap_pointer_handles.emplace(key, cached_handle);
-                stack.push_back(cached_handle);
+                push_value(cached_handle);
                 break;
             }
             pointer_heap.push_back(adjusted);
-            stack.push_back(pointer_heap.size());
+            push_value(pointer_heap.size());
             break;
         }
         case Op::load_indirect:
-            stack.push_back(load_pointer(pop()));
+            push_value(load_pointer(pop()));
             break;
         case Op::store_indirect: {
             const auto [pointer, value] = pop_binary(reordered);
@@ -2149,7 +2565,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto pointer = pop();
             const auto target =
                 offset_pointer_target(pointer, offset, type);
-            stack.push_back(load_pointer_target(target));
+            push_value(load_pointer_target(target));
             break;
         }
         case Op::store_indexed: {
@@ -2168,7 +2584,7 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::convert: {
             const auto source = operands.read_type();
             const auto target = operands.read_type();
-            stack.push_back(convert_value(pop(), source, target));
+            push_value(convert_value(pop(), source, target));
             break;
         }
         case Op::add:
@@ -2178,8 +2594,14 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::modulo: {
             const auto type = operands.read_type();
             const auto [left, right] = pop_binary(reordered);
-            stack.push_back(
-                arithmetic(op, type, left, right, substituted));
+            std::uint64_t nested_result = 0;
+            if (nested && !is_floating(type) &&
+                nested_binary_op(op, type, left, right, vm.opcode_seed, mba,
+                                 nested_result)) {
+                push_value(nested_result);
+            } else {
+                push_value(arithmetic(op, type, left, right, mba));
+            }
             break;
         }
         case Op::bit_and:
@@ -2189,19 +2611,25 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::shift_right: {
             const auto type = operands.read_type();
             const auto [left, right] = pop_binary(reordered);
-            stack.push_back(integral_arithmetic(op, type, left, right,
-                                                substituted));
+            std::uint64_t nested_result = 0;
+            if (nested && nested_binary_op(op, type, left, right,
+                                           vm.opcode_seed, mba,
+                                           nested_result)) {
+                push_value(nested_result);
+            } else {
+                push_value(integral_arithmetic(op, type, left, right, mba));
+            }
             break;
         }
         case Op::bit_not: {
             const auto type = operands.read_type();
-            stack.push_back(normalize_integral(type, ~pop()));
+            push_value(normalize_integral(type, ~pop()));
             break;
         }
         case Op::negate: {
             const auto type = operands.read_type();
             const auto value = pop();
-            stack.push_back(substituted && !is_floating(type)
+            push_value(substituted && !is_floating(type)
                                 ? normalize_integral(
                                       type,
                                       handler_value_barrier(~value) + 1)
@@ -2211,7 +2639,7 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::logical_not: {
             const auto type = operands.read_type();
             const auto value = truthy(type, pop());
-            stack.push_back(substituted
+            push_value(substituted
                                 ? static_cast<std::uint64_t>(!value)
                                 : (value ? 0 : 1));
             break;
@@ -2230,13 +2658,13 @@ std::int64_t execute(const Bytecode& bytecode) {
                         "Concept VM string ordering is not supported"));
                 }
                 const bool equal = substituted
-                                       ? text_value(text_heap, right) ==
-                                             text_value(text_heap, left)
-                                       : text_value(text_heap, left) ==
-                                             text_value(text_heap, right);
-                stack.push_back((op == Op::equal ? equal : !equal) ? 1 : 0);
+                                       ? text_value(text_heap, bytecode.strings, right) ==
+                                             text_value(text_heap, bytecode.strings, left)
+                                       : text_value(text_heap, bytecode.strings, left) ==
+                                             text_value(text_heap, bytecode.strings, right);
+                push_value((op == Op::equal ? equal : !equal) ? 1 : 0);
             } else {
-                stack.push_back(compare_values(op, type, left, right,
+                push_value(compare_values(op, type, left, right,
                                                substituted)
                                     ? 1
                                     : 0);
@@ -2308,14 +2736,14 @@ std::int64_t execute(const Bytecode& bytecode) {
         }
         case Op::input_text:
             text_heap.push_back(read_input_line());
-            stack.push_back(text_heap.size() - 1);
+            push_value(text_heap.size() - 1);
             break;
         case Op::input_i64:
-            stack.push_back(
+            push_value(
                 static_cast<std::uint64_t>(read_input_i64()));
             break;
         case Op::input_f64:
-            stack.push_back(f64_bits(read_input_f64()));
+            push_value(f64_bits(read_input_f64()));
             break;
         case Op::entropy_fill: {
             const auto count = pop();
@@ -2331,21 +2759,21 @@ std::int64_t execute(const Bytecode& bytecode) {
                     value >>= 8;
                 }
             }
-            stack.push_back(1);
+            push_value(1);
             break;
         }
         case Op::text_length:
-            stack.push_back(text_value(text_heap, pop()).size());
+            push_value(text_value(text_heap, bytecode.strings, pop()).size());
             break;
         case Op::text_byte: {
             const auto index = pop();
             const auto text = pop();
-            const auto& value = text_value(text_heap, text);
+            const auto& value = text_value(text_heap, bytecode.strings, text);
             if (index >= value.size()) {
                 throw std::runtime_error(
                     xorstr_("Concept string byte index is out of bounds"));
             }
-            stack.push_back(static_cast<std::uint8_t>(
+            push_value(static_cast<std::uint8_t>(
                 value[static_cast<std::size_t>(index)]));
             break;
         }
@@ -2359,7 +2787,7 @@ std::int64_t execute(const Bytecode& bytecode) {
                 text_heap.emplace_back(
                     reinterpret_cast<const char*>(bytes.data()), bytes.size());
             }
-            stack.push_back(text_heap.size() - 1);
+            push_value(text_heap.size() - 1);
             break;
         }
         case Op::system_verify_x509: {
@@ -2367,8 +2795,8 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto pointer = pop();
             const auto host = pop();
             const auto bytes = byte_span(pointer, count);
-            stack.push_back(verify_system_x509_chain(
-                                text_value(text_heap, host), bytes)
+            push_value(verify_system_x509_chain(
+                                text_value(text_heap, bytecode.strings, host), bytes)
                                 ? 1
                                 : 0);
             break;
@@ -2376,8 +2804,8 @@ std::int64_t execute(const Bytecode& bytecode) {
         case Op::print:
         case Op::println: {
             const auto type = operands.read_type();
-            print_value(type, pop(), text_heap, op == Op::println);
-            stack.push_back(0);
+            print_value(type, pop(), text_heap, bytecode.strings, op == Op::println);
+            push_value(0);
             break;
         }
         case Op::native_call: {
@@ -2398,7 +2826,7 @@ std::int64_t execute(const Bytecode& bytecode) {
                 } else if (kind == 1) {
                     arguments[index - 1] =
                         reinterpret_cast<std::uintptr_t>(
-                            text_value(text_heap, value).c_str());
+                            text_value(text_heap, bytecode.strings, value).c_str());
                 } else if (kind == 2) {
                     arguments[index - 1] = native_pointer_address(value);
                 } else {
@@ -2408,54 +2836,54 @@ std::int64_t execute(const Bytecode& bytecode) {
             }
             const auto symbol = pop();
             const auto module = pop();
-            stack.push_back(invoke_native_call(
-                text_value(text_heap, module),
-                text_value(text_heap, symbol), arguments,
+            push_value(invoke_native_call(
+                text_value(text_heap, bytecode.strings, module),
+                text_value(text_heap, bytecode.strings, symbol), arguments,
                 static_cast<std::size_t>(argument_count)));
             break;
         }
         case Op::socket_open:
-            stack.push_back(socket_bits(open_tcp_socket()));
+            push_value(socket_bits(open_tcp_socket()));
             break;
         case Op::socket_connect:
         case Op::socket_bind: {
             const auto port = static_cast<std::uint16_t>(pop());
             const auto host = pop();
             const auto handle = native_socket(pop());
-            const auto& host_text = text_value(text_heap, host);
+            const auto& host_text = text_value(text_heap, bytecode.strings, host);
             const bool success =
                 op == Op::socket_connect
                     ? connect_tcp_socket(handle, host_text, port)
                     : bind_tcp_socket(handle, host_text, port);
-            stack.push_back(success ? 1 : 0);
+            push_value(success ? 1 : 0);
             break;
         }
         case Op::socket_listen: {
             const auto backlog = static_cast<int>(
                 signed_value(ValueType::i32, pop()));
             const auto handle = native_socket(pop());
-            stack.push_back(listen_tcp_socket(handle, backlog) ? 1 : 0);
+            push_value(listen_tcp_socket(handle, backlog) ? 1 : 0);
             break;
         }
         case Op::socket_accept:
-            stack.push_back(socket_bits(accept_tcp_socket(native_socket(pop()))));
+            push_value(socket_bits(accept_tcp_socket(native_socket(pop()))));
             break;
         case Op::socket_send: {
             const auto text = pop();
             const auto handle = native_socket(pop());
-            stack.push_back(static_cast<std::uint64_t>(
-                send_tcp_text(handle, text_value(text_heap, text))));
+            push_value(static_cast<std::uint64_t>(
+                send_tcp_text(handle, text_value(text_heap, bytecode.strings, text))));
             break;
         }
         case Op::socket_receive:
             text_heap.push_back(receive_tcp_text(native_socket(pop())));
-            stack.push_back(text_heap.size() - 1);
+            push_value(text_heap.size() - 1);
             break;
         case Op::socket_send_bytes: {
             const auto count = pop();
             const auto pointer = pop();
             const auto handle = native_socket(pop());
-            stack.push_back(static_cast<std::uint64_t>(
+            push_value(static_cast<std::uint64_t>(
                 send_tcp_bytes(handle, byte_span(pointer, count))));
             break;
         }
@@ -2463,21 +2891,32 @@ std::int64_t execute(const Bytecode& bytecode) {
             const auto count = pop();
             const auto pointer = pop();
             const auto handle = native_socket(pop());
-            stack.push_back(static_cast<std::uint64_t>(
+            push_value(static_cast<std::uint64_t>(
                 receive_tcp_bytes(handle, byte_span(pointer, count))));
             break;
         }
         case Op::socket_close: {
             const auto handle = native_socket(pop());
-            stack.push_back(handle != invalid_socket &&
+            push_value(handle != invalid_socket &&
                                     close_native_socket(handle)
                                 ? 1
                                 : 0);
             break;
         }
-        case Op::set_complexity:
+        case Op::set_complexity: {
             frames.back().complexity = operands.read_u8();
+            // Establish the masked representation for this frame's locals. The
+            // arguments were written in the clear before the frame began
+            // executing, so mask them now that the frame is known obfuscated.
+            if (frames.back().complexity != 0) {
+                auto& frame = frames.back();
+                for (std::size_t index = 0; index < frame.locals.size();
+                     ++index) {
+                    frame.locals[index] ^= local_raw_mask(frame.id, index);
+                }
+            }
             break;
+        }
         case Op::return_value: {
             const auto result = pop();
             const auto stack_base = frames.back().stack_base;
@@ -2489,7 +2928,7 @@ std::int64_t execute(const Bytecode& bytecode) {
             if (frames.empty()) {
                 return exit_value(bytecode.entry_type, result);
             }
-            stack.push_back(constructor_result == 0 ? result
+            push_value(constructor_result == 0 ? result
                                                     : constructor_result);
             ip = return_ip;
             break;

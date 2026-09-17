@@ -3523,39 +3523,147 @@ private:
         }
     }
 
+    // Pushes one operand for an opaque predicate. A live frame local is a
+    // runtime-unknown value, which defeats static constant folding; when no
+    // local is in scope yet a compile-time constant is used instead (the
+    // predicates below are identities, so they hold for either).
+    void emit_opaque_operand(const std::uint64_t fallback) {
+        if (!locals_.empty()) {
+            emit(Op::load);
+            emit_u16(0);
+        } else {
+            emit(Op::push_bits);
+            emit_u64(fallback);
+        }
+    }
+
+    // Leaves a single boolean on the stack that is always true, built from a
+    // number-theoretic identity rather than a literal tautology so a static
+    // analyzer cannot fold it without reasoning about the arithmetic.
+    void emit_opaque_true() {
+        const auto x = next_obfuscation_random() | 1ULL;
+        const auto push_x = [&] { emit_opaque_operand(x); };
+        switch (next_obfuscation_random() % 4) {
+        case 0:
+            // (x * x) & 2 == 0: a square is never 2 or 3 modulo 4.
+            push_x();
+            push_x();
+            emit(Op::multiply);
+            emit_type(ValueType::u64);
+            emit(Op::push_bits);
+            emit_u64(2);
+            emit(Op::bit_and);
+            emit_type(ValueType::u64);
+            emit(Op::push_bits);
+            emit_u64(0);
+            emit(Op::equal);
+            emit_type(ValueType::u64);
+            break;
+        case 1:
+            // (x * (x + 1)) & 1 == 0: consecutive integers have an even product.
+            push_x();
+            push_x();
+            emit(Op::push_bits);
+            emit_u64(1);
+            emit(Op::add);
+            emit_type(ValueType::u64);
+            emit(Op::multiply);
+            emit_type(ValueType::u64);
+            emit(Op::push_bits);
+            emit_u64(1);
+            emit(Op::bit_and);
+            emit_type(ValueType::u64);
+            emit(Op::push_bits);
+            emit_u64(0);
+            emit(Op::equal);
+            emit_type(ValueType::u64);
+            break;
+        case 2:
+            // (x | 1) & 1 == 1: setting the low bit makes an odd number.
+            push_x();
+            emit(Op::push_bits);
+            emit_u64(1);
+            emit(Op::bit_or);
+            emit_type(ValueType::u64);
+            emit(Op::push_bits);
+            emit_u64(1);
+            emit(Op::bit_and);
+            emit_type(ValueType::u64);
+            emit(Op::push_bits);
+            emit_u64(1);
+            emit(Op::equal);
+            emit_type(ValueType::u64);
+            break;
+        default:
+            // (x * x + x) & 1 == 0: x*x + x = x*(x + 1) is even.
+            push_x();
+            push_x();
+            emit(Op::multiply);
+            emit_type(ValueType::u64);
+            push_x();
+            emit(Op::add);
+            emit_type(ValueType::u64);
+            emit(Op::push_bits);
+            emit_u64(1);
+            emit(Op::bit_and);
+            emit_type(ValueType::u64);
+            emit(Op::push_bits);
+            emit_u64(0);
+            emit(Op::equal);
+            emit_type(ValueType::u64);
+            break;
+        }
+    }
+
+    // Emits stack-neutral filler for a bogus block. It is placed on a path an
+    // opaque predicate never takes, but is deliberately balanced so that even
+    // if reached it neither corrupts the stack nor changes the result.
+    void emit_dead_code() {
+        switch (next_obfuscation_random() % 3) {
+        case 0:
+            emit(Op::push_bits);
+            emit_u64(next_obfuscation_random());
+            emit(Op::push_bits);
+            emit_u64(next_obfuscation_random());
+            emit(Op::multiply);
+            emit_type(ValueType::u64);
+            emit(Op::pop);
+            break;
+        case 1:
+            emit(Op::push_bits);
+            emit_u64(next_obfuscation_random());
+            emit(Op::push_bits);
+            emit_u64(next_obfuscation_random());
+            emit(Op::bit_xor);
+            emit_type(ValueType::u64);
+            emit(Op::push_bits);
+            emit_u64(next_obfuscation_random());
+            emit(Op::add);
+            emit_type(ValueType::u64);
+            emit(Op::pop);
+            break;
+        default:
+            emit(Op::push_bits);
+            emit_u64(next_obfuscation_random());
+            emit(Op::negate);
+            emit_type(ValueType::i64);
+            emit(Op::pop);
+            break;
+        }
+    }
+
     void emit_obfuscation_layer() {
         emit(Op::jump);
         const auto predicate_target = reserve_u32();
 
         const auto dead_target = checked_offset();
-        emit(Op::push_bits);
-        emit_u64(next_obfuscation_random());
-        emit(Op::push_bits);
-        emit_u64(next_obfuscation_random());
-        emit(Op::multiply);
-        emit_type(ValueType::u64);
-        emit(Op::pop);
-        emit(Op::push_bits);
-        emit_u64(next_obfuscation_random());
-        emit(Op::negate);
-        emit_type(ValueType::i64);
-        emit(Op::pop);
+        emit_dead_code();
+        emit_dead_code();
         emit(Op::jump);
         const auto dead_exit = reserve_u32();
 
         patch_u32(predicate_target, checked_offset());
-        const auto left = next_obfuscation_random();
-        const auto right = next_obfuscation_random();
-        emit(Op::push_bits);
-        emit_u64(left);
-        emit(Op::push_bits);
-        emit_u64(right);
-        emit(Op::add);
-        emit_type(ValueType::u64);
-        emit(Op::push_bits);
-        emit_u64(left + right);
-        emit(Op::equal);
-        emit_type(ValueType::u64);
+        emit_opaque_true();
         emit(Op::jump_if_false);
         emit_u32(dead_target);
         emit(Op::jump);

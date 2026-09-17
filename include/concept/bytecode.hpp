@@ -41,6 +41,21 @@ enum class ValueType : std::uint8_t {
     return is_integral(type) || is_floating(type);
 }
 
+// Keystream for masking a push_bits immediate in the stored bytecode. The
+// serializer XORs each immediate with this before encoding; the VM reverses it
+// in the handler, keyed by the region's opcode seed and the instruction's
+// logical offset (which the VM recovers as `logical_instruction`). Keeping the
+// masked form in memory hides literal constants from a dump of the decoded
+// bytecode even after the at-rest region cipher has been removed.
+[[nodiscard]] inline std::uint64_t immediate_mask(const std::uint64_t seed,
+                                                  const std::uint64_t offset) {
+    auto value = seed ^ (offset * 0x9e3779b97f4a7c15ULL) ^
+                 0xd1b54a32d192ed03ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
 enum class Op : std::uint8_t {
     push_bits,
     push_text,
@@ -127,6 +142,11 @@ struct Bytecode {
     std::array<std::uint8_t, 32> string_key{};
     std::array<std::uint8_t, 12> string_nonce{};
     std::vector<std::string> strings;
+    // True once the code has been through serialization, which leaves push_bits
+    // immediates masked in memory (see immediate_mask). The VM reverses the mask
+    // per instruction only when this is set, so execute() is correct on both
+    // freshly compiled code (immediates in the clear) and deserialized code.
+    bool immediates_masked{};
 };
 
 [[nodiscard]] std::size_t operand_size(Op op);

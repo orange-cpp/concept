@@ -30,6 +30,32 @@ void expect(const bool condition, const std::string_view message) {
     }
 }
 
+// Reverses push_bits immediate masking so structural roundtrip checks can
+// compare decoded bytecode against the canonical (pre-serialization) code.
+// Assumes canonical instruction order, so reversed regions must be physically
+// un-reversed first (logical offset then equals the byte offset).
+std::vector<std::uint8_t> without_immediate_mask(
+    std::vector<std::uint8_t> code,
+    const std::vector<cpt::Bytecode::VmRegion>& regions) {
+    for (const auto& region : regions) {
+        std::size_t offset = region.begin;
+        while (offset < region.end) {
+            const auto op = static_cast<cpt::Op>(code[offset]);
+            const auto size = cpt::operand_size(op);
+            if (op == cpt::Op::push_bits && size == 8) {
+                const auto mask =
+                    cpt::immediate_mask(region.opcode_seed, offset);
+                for (std::size_t byte = 0; byte < 8; ++byte) {
+                    code[offset + 1 + byte] ^=
+                        static_cast<std::uint8_t>(mask >> (byte * 8));
+                }
+            }
+            offset += 1 + size;
+        }
+    }
+    return code;
+}
+
 void execution_test() {
     constexpr std::string_view source = R"(
         fn forty() -> i64 {
@@ -158,7 +184,8 @@ void encoded_bytecode_test() {
     }
 
     const auto loaded = cpt::deserialize(image);
-    expect(loaded.code == compiled.code,
+    expect(without_immediate_mask(loaded.code, loaded.vm_regions) ==
+               compiled.code,
            "rolling-key decoding should preserve forward bytecode");
     expect(cpt::execute(loaded) == static_cast<std::int64_t>(literal),
            "rolling-key decoded operands should execute unchanged");
@@ -190,7 +217,9 @@ void bytecode_direction_test() {
            "VM seed direction bit should select forward and reversed regions");
     expect(forward_image != reversed_image,
            "opposite bytecode directions should produce different images");
-    expect(forward.code == compiled.code && reversed.code != compiled.code,
+    expect(without_immediate_mask(forward.code, forward.vm_regions) ==
+                   compiled.code &&
+               reversed.code != compiled.code,
            "reversed VM regions should remain physically reversed");
     auto restored = reversed.code;
     for (const auto& region : reversed.vm_regions) {
@@ -200,7 +229,8 @@ void bytecode_direction_test() {
                 restored.begin() + static_cast<std::ptrdiff_t>(region.end));
         }
     }
-    expect(restored == compiled.code,
+    expect(without_immediate_mask(restored, reversed.vm_regions) ==
+               compiled.code,
            "reversing physical VM regions should recover logical bytecode");
     const auto& reversed_region = reversed.vm_regions.front();
     const auto physical_entry =

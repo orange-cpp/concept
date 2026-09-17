@@ -9,12 +9,16 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <vector>
 #endif
 
 namespace {
@@ -28,8 +32,40 @@ std::filesystem::path current_executable(const char* argv0) {
         buffer.resize(length);
         return std::filesystem::path(buffer);
     }
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> buffer(size);
+    if (size != 0 && _NSGetExecutablePath(buffer.data(), &size) == 0) {
+        std::error_code error;
+        auto resolved =
+            std::filesystem::canonical(buffer.data(), error);
+        if (!error) {
+            return resolved;
+        }
+        return std::filesystem::absolute(buffer.data());
+    }
 #endif
     return std::filesystem::absolute(argv0);
+}
+
+// Locate the standard-library module root beside the compiler. Newer layouts
+// stage the modules under "lib/concept" (so the directory never collides with
+// the "concept" executable on platforms without an .exe extension); the legacy
+// Windows layout keeps them directly under "concept".
+std::filesystem::path module_root_for(
+    const std::filesystem::path& compiler_directory) {
+    const std::filesystem::path candidates[] = {
+        compiler_directory / "lib" / "concept",
+        compiler_directory / "concept",
+    };
+    for (const auto& candidate : candidates) {
+        std::error_code error;
+        if (std::filesystem::is_directory(candidate, error) && !error) {
+            return candidate;
+        }
+    }
+    return candidates[0];
 }
 
 std::string read_source(const std::filesystem::path& path) {
@@ -73,8 +109,9 @@ int main(const int argc, char** argv) {
 #endif
         std::uint32_t vm_count = 4;
         bool shared_module = false;
-        bool output_was_set = false;
-        bool runtime_was_set = false;
+        // Only consulted in the Windows shared-module branch below.
+        [[maybe_unused]] bool output_was_set = false;
+        [[maybe_unused]] bool runtime_was_set = false;
 
         for (int index = 2; index < argc; ++index) {
             const std::string argument = argv[index];
@@ -127,7 +164,7 @@ int main(const int argc, char** argv) {
         }
 
         const auto source = read_source(source_path);
-        const auto module_root = compiler_directory / "concept";
+        const auto module_root = module_root_for(compiler_directory);
         const auto bytecode = cpt::compile(source, source_path.string(),
                                            vm_count, module_root.string(),
                                            shared_module

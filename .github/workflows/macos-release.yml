@@ -1,0 +1,127 @@
+name: macOS release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing draft or published release tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-release-${{ github.event.release.tag_name || inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-package-upload:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Resolve release commit
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          encoded_tag=$(printf '%s' "$RELEASE_TAG" | jq -sRr @uri)
+          release_json=$(gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$encoded_tag")
+
+          is_draft=$(printf '%s' "$release_json" | jq -r '.draft')
+          tag_name=$(printf '%s' "$release_json" | jq -r '.tag_name')
+          if [ "$is_draft" = "true" ]; then
+              source_ref=$(printf '%s' "$release_json" | jq -r '.target_commitish')
+          else
+              source_ref="$tag_name"
+          fi
+
+          encoded_ref=$(printf '%s' "$source_ref" | jq -sRr @uri)
+          commit=$(gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/commits/$encoded_ref" --jq '.sha')
+          if [ -z "$commit" ]; then
+              echo "Cannot resolve release target '$source_ref'." >&2
+              exit 1
+          fi
+
+          safe_tag=$(printf '%s' "$tag_name" | tr -c 'A-Za-z0-9._-' '-')
+          {
+              echo "tag=$tag_name"
+              echo "commit=$commit"
+              echo "asset_name=concept-$safe_tag-macos-universal.tar.gz"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.release.outputs.commit }}
+
+      - name: Configure Release
+        run: >-
+          cmake -S . -B build-release
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build-release --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build-release -C Release --output-on-failure
+
+      - name: Stage release archive
+        id: package
+        env:
+          ASSET_NAME: ${{ steps.release.outputs.asset_name }}
+        run: |
+          set -euo pipefail
+          dist="$PWD/dist"
+          stage="$dist/concept-macos-universal"
+          binaries="$PWD/build-release"
+          mkdir -p "$stage"
+
+          for name in concept concept-runtime; do
+              source="$binaries/$name"
+              if [ ! -f "$source" ]; then
+                  echo "Required release binary is missing: $source" >&2
+                  exit 1
+              fi
+              cp "$source" "$stage/"
+          done
+
+          # Modules live under lib/concept so the directory never collides with
+          # the extension-less "concept" executable in the same folder.
+          mkdir -p "$stage/lib"
+          cp -R "$PWD/concept" "$stage/lib/concept"
+          mkdir -p "$stage/docs"
+          cp "$PWD/docs/SYNTAX.md" "$stage/docs/SYNTAX.md"
+          cp "$PWD/README.md" "$PWD/THIRD_PARTY_NOTICES.md" "$stage/"
+
+          smoke_output="$dist/release-smoke"
+          "$stage/concept" "$PWD/examples/dynamic-array.concept" -o "$smoke_output"
+          if [ ! -f "$smoke_output" ]; then
+              echo "The staged compiler failed its standard-library smoke test." >&2
+              exit 1
+          fi
+
+          archive="$dist/$ASSET_NAME"
+          tar -czf "$archive" -C "$dist" "concept-macos-universal"
+          echo "archive_path=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Attach release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" "$ARCHIVE_PATH" --clobber \
+            --repo "$GITHUB_REPOSITORY"

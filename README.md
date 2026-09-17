@@ -1,6 +1,6 @@
 # Concept
 
-Concept is an experimental C-like language designed to help protect compiled applications from reverse engineering. It compiles programs to bytecode and packages each one as a native executable or Windows DLL containing both the Concept virtual machine and the program bytecode.
+Concept is an experimental C-like language designed to help protect compiled applications from reverse engineering. It compiles programs to bytecode and packages each one as a native executable — on Windows, macOS, and Linux — or a Windows DLL, containing both the Concept virtual machine and the program bytecode.
 
 See the [Concept language syntax reference](docs/SYNTAX.md) for the grammar,
 types, operators, pointers, classes, imports, and built-in APIs implemented now.
@@ -27,13 +27,31 @@ Extension sources and development instructions are in
 
 ## Build
 
-With Visual Studio 2022 or another C++23 compiler:
+Concept builds on Windows, macOS, and Linux with any C++23 compiler
+(MSVC, Clang, or GCC) and CMake 3.24 or newer.
+
+On Windows, with Visual Studio 2022 or another C++23 compiler:
 
 ```powershell
 cmake -S . -B build
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
+
+On macOS (Apple Silicon or Intel) or Linux, with a single-config generator:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build -C Release --output-on-failure
+```
+
+macOS builds require the Xcode command line tools (`xcode-select --install`).
+The Concept VM validates TLS certificate chains for `std::https` through the
+system trust store — Windows CryptoAPI on Windows and the Security framework
+(`SecTrust`) on macOS; those frameworks are linked automatically. To build a
+universal binary that runs on both Apple Silicon and Intel, configure with
+`-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`.
 
 MSVC builds use the static CRT: `/MT` in Release and `/MTd` in Debug.
 The first CMake configure downloads a SHA-256-verified, pinned revision of
@@ -45,6 +63,15 @@ runtime string obfuscation.
 `Windows CI` validates and packages the VS Code extension, builds the x64 MSVC
 Release configuration, and runs the complete CTest suite for every push, pull
 request, and manual run.
+
+`macOS CI` builds the Release configuration with Apple Clang and runs the same
+CTest suite on `macos-latest` for every push, pull request, and manual run.
+
+`macOS release` builds and tests a release commit, stages a self-contained
+universal (`arm64` + `x86_64`) distribution, and attaches the compiler
+`.tar.gz` to the matching GitHub release. The archive contains `concept`,
+`concept-runtime`, the `lib/concept/std` library sources, the syntax reference,
+README, and third-party notices.
 
 `Windows release` builds and tests a release commit, stages a self-contained
 Windows x64 distribution, builds the VS Code extension, and attaches both the
@@ -69,15 +96,27 @@ assets.
 
 ## Compile a Concept program
 
+On Windows:
+
 ```powershell
 .\build\Release\concept.exe .\examples\answer.concept -o answer.exe
 .\answer.exe
 $LASTEXITCODE # 42
 ```
 
-For a single-config generator, the compiler is normally at `build/concept.exe`
-instead. The compiler locates `concept-runtime.exe` beside itself; use
-`--runtime <path>` to select it explicitly.
+On macOS or Linux the output executable has no extension:
+
+```bash
+./build/concept ./examples/answer.concept -o answer
+./answer
+echo $? # 42
+```
+
+For a single-config generator (macOS/Linux, or a single-config Windows
+generator), the compiler is at `build/concept` (`build/concept.exe` on Windows)
+instead of `build/Release/`. The compiler locates the matching
+`concept-runtime` stub beside itself; use `--runtime <path>` to select it
+explicitly.
 
 The interactive calculator example can be built and run with:
 
@@ -86,8 +125,9 @@ The interactive calculator example can be built and run with:
 .\calculator.exe
 ```
 
-On Windows, `--shared-module` packages a DLL instead. A shared module uses a
-parameterless `dll_main` function returning `bool`:
+`--shared-module` packages a DLL instead and is available only on Windows;
+on macOS and Linux the compiler reports that shared modules are unsupported.
+A shared module uses a parameterless `dll_main` function returning `bool`:
 
 ```c
 import std::win_api;
@@ -124,8 +164,10 @@ This resolves `concept/std/socket.concept`. `std` modules and classes use
 qualified names such as `std::socket` and `std::Socket`. Imports are
 deduplicated, may import other
 modules, and report cycles as compile errors. The compiler also installs its
-standard `concept` directory beside `concept.exe` so standard modules remain
-available when compiling a source from another directory.
+standard library beside itself so standard modules remain available when
+compiling a source from another directory. It searches for that library at
+`lib/concept` next to the compiler and then, for the packaged Windows layout,
+at a sibling `concept` directory.
 
 Generated programs use four cooperative VM contexts by default. Select between
 1 and 64 contexts with `--vms`:

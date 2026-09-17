@@ -35,6 +35,14 @@ target_link_libraries(concept_core PUBLIC concept_xorstr)
 target_compile_definitions(concept_core PRIVATE
     JM_XORSTR_DISABLE_AVX_INTRINSICS
 )
+if(APPLE)
+    # System trust-store certificate validation (std::https without pinning)
+    # is backed by the Security framework on macOS.
+    target_link_libraries(concept_core PUBLIC
+        "-framework CoreFoundation"
+        "-framework Security"
+    )
+endif()
 
 add_library(concept_frontend
     src/compiler.cpp
@@ -62,10 +70,14 @@ endif()
 
 add_executable(concept src/main.cpp)
 target_link_libraries(concept PRIVATE concept_frontend)
+# Stage the standard-library modules under "lib/concept" next to the compiler.
+# The nested directory avoids colliding with the "concept" executable itself,
+# which matters on platforms where the compiler binary has no file extension
+# (macOS and Linux): a file and a directory cannot share a name in one folder.
 add_custom_target(concept-modules
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/concept"
-        "$<TARGET_FILE_DIR:concept-runtime>/concept"
+        "$<TARGET_FILE_DIR:concept-runtime>/lib/concept"
 )
 add_dependencies(concept concept-runtime concept-modules)
 if(WIN32)
@@ -229,6 +241,22 @@ if(BUILD_TESTING)
             -DCOMPILER=$<TARGET_FILE:concept>
             -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/arguments.concept
             -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-arguments-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-mba
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/mba-self-test.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-mba-smoke.exe
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
+    )
+    add_test(
+        NAME concept-packaged-masked-locals
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:concept>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/masked-locals-self-test.concept
+            -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/concept-masked-locals-smoke.exe
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_packaged.cmake
     )
     if(WIN32)

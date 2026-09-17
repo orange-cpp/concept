@@ -14,6 +14,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <cstdint>
+#include <system_error>
+#include <vector>
 #endif
 
 namespace {
@@ -26,6 +31,18 @@ std::filesystem::path current_executable(const char* argv0) {
     if (length != 0 && length < buffer.size()) {
         buffer.resize(length);
         return std::filesystem::path(buffer);
+    }
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> buffer(size);
+    if (size != 0 && _NSGetExecutablePath(buffer.data(), &size) == 0) {
+        std::error_code error;
+        auto resolved = std::filesystem::canonical(buffer.data(), error);
+        if (!error) {
+            return resolved;
+        }
+        return std::filesystem::absolute(buffer.data());
     }
 #endif
     return std::filesystem::absolute(argv0);
